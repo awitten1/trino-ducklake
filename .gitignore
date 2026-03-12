@@ -1,0 +1,11 @@
+target/
+trino-server-*/
+.trino-data/
+*.class
+*.jar
+*.log
+.idea/
+*.iml
+.project
+.classpath
+.settings/
