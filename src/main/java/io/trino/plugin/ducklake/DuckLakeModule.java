@@ -14,6 +14,7 @@ public class DuckLakeModule
     {
         binder.bind(DuckLakeConnector.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeMetadata.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakeConnectionManager.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeClient.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeRecordSetProvider.class).in(Scopes.SINGLETON);

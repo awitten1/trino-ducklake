@@ -11,13 +11,18 @@ import static java.util.Objects.requireNonNull;
 public class DuckLakeRecordSet
         implements RecordSet
 {
-    private final DuckLakeTableHandle tableHandle;
+    private final DuckLakeSplit split;
     private final List<DuckLakeColumnHandle> columnHandles;
+    private final DuckLakeConnectionManager connectionManager;
 
-    public DuckLakeRecordSet(DuckLakeTableHandle tableHandle, List<DuckLakeColumnHandle> columnHandles)
+    public DuckLakeRecordSet(
+            DuckLakeSplit split,
+            List<DuckLakeColumnHandle> columnHandles,
+            DuckLakeConnectionManager connectionManager)
     {
-        this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
+        this.split = requireNonNull(split, "split is null");
         this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
+        this.connectionManager = requireNonNull(connectionManager, "connectionManager is null");
     }
 
     @Override
@@ -31,7 +36,6 @@ public class DuckLakeRecordSet
     @Override
     public RecordCursor cursor()
     {
-        // TODO: implement cursor that reads data from DuckLake via DuckDB
-        throw new UnsupportedOperationException("not yet implemented");
+        return new DuckLakeRecordCursor(split, columnHandles, connectionManager);
     }
 }

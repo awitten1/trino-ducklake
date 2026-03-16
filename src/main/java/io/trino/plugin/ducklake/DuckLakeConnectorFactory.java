@@ -7,6 +7,7 @@ import io.trino.plugin.base.TypeDeserializerModule;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.type.TypeManager;
 
 import java.util.Map;
 
@@ -26,9 +27,12 @@ public class DuckLakeConnectorFactory
     {
         requireNonNull(requiredConfig, "requiredConfig is null");
 
+        TypeManager typeManager = context.getTypeManager();
+
         Bootstrap app = new Bootstrap(
                 new JsonModule(),
                 new TypeDeserializerModule(),
+                binder -> binder.bind(TypeManager.class).toInstance(typeManager),
                 new DuckLakeModule());
 
         Injector injector = app

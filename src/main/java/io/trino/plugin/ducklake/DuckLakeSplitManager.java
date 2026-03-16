@@ -12,11 +12,18 @@ import io.trino.spi.connector.FixedSplitSource;
 
 import java.util.List;
 
+import static java.util.Objects.requireNonNull;
+
 public class DuckLakeSplitManager
         implements ConnectorSplitManager
 {
+    private final DuckLakeClient client;
+
     @Inject
-    public DuckLakeSplitManager() {}
+    public DuckLakeSplitManager(DuckLakeClient client)
+    {
+        this.client = requireNonNull(client, "client is null");
+    }
 
     @Override
     public ConnectorSplitSource getSplits(
@@ -26,6 +33,28 @@ public class DuckLakeSplitManager
             DynamicFilter dynamicFilter,
             Constraint constraint)
     {
-        return new FixedSplitSource(List.of(DuckLakeSplit.INSTANCE));
+        DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) connectorTableHandle;
+
+        // Resolve table path info needed for data file path construction
+        DuckLakeTableInfo tableInfo = client.getTableInfo(
+                        tableHandle.getSchemaName(),
+                        tableHandle.getTableName())
+                .orElseThrow(() -> new IllegalStateException(
+                        "Table not found: " + tableHandle.toSchemaTableName()));
+
+        List<DuckLakeDataFileInfo> dataFiles = client.getDataFiles(
+                tableHandle.getTableId(),
+                tableHandle.getSnapshotId(),
+                tableInfo);
+
+        List<DuckLakeSplit> splits = dataFiles.stream()
+                .map(file -> new DuckLakeSplit(
+                        file.dataFilePath(),
+                        file.deleteFilePath(),
+                        file.rowIdStart(),
+                        file.recordCount()))
+                .toList();
+
+        return new FixedSplitSource(splits);
     }
 }

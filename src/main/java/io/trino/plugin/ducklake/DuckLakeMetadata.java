@@ -36,36 +36,34 @@ public class DuckLakeMetadata
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
     {
-        return listSchemaNames();
-    }
-
-    public List<String> listSchemaNames()
-    {
-        return ImmutableList.copyOf(duckLakeClient.getSchemaNames());
+        return duckLakeClient.getSchemaNames();
     }
 
     @Override
-    public DuckLakeTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
+    public DuckLakeTableHandle getTableHandle(
+            ConnectorSession session,
+            SchemaTableName tableName,
+            Optional<ConnectorTableVersion> startVersion,
+            Optional<ConnectorTableVersion> endVersion)
     {
         if (startVersion.isPresent() || endVersion.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
         }
 
-        if (!listSchemaNames(session).contains(tableName.getSchemaName())) {
-            return null;
-        }
-
-        if (!duckLakeClient.tableExists(tableName.getSchemaName(), tableName.getTableName())) {
-            return null;
-        }
-
-        return new DuckLakeTableHandle(tableName.getSchemaName(), tableName.getTableName());
+        return duckLakeClient.getTableInfoWithSnapshot(tableName.getSchemaName(), tableName.getTableName())
+                .map(tis -> new DuckLakeTableHandle(
+                        tableName.getSchemaName(),
+                        tableName.getTableName(),
+                        tis.tableInfo().tableId(),
+                        tis.snapshotId()))
+                .orElse(null);
     }
 
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
-        return getTableMetadata(((DuckLakeTableHandle) table).toSchemaTableName());
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) table;
+        return getTableMetadata(handle.toSchemaTableName());
     }
 
     @Override
@@ -79,15 +77,24 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle duckLakeTableHandle = (DuckLakeTableHandle) tableHandle;
 
-        List<ColumnMetadata> columns = duckLakeClient.getColumns(duckLakeTableHandle.getSchemaName(), duckLakeTableHandle.getTableName());
-        if (columns == null) {
+        List<DuckLakeColumnInfo> columnInfos = duckLakeClient.getColumnInfos(
+                duckLakeTableHandle.getTableId(),
+                duckLakeTableHandle.getSnapshotId());
+
+        if (columnInfos == null) {
             throw new TableNotFoundException(duckLakeTableHandle.toSchemaTableName());
         }
 
         ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
         int index = 0;
-        for (ColumnMetadata column : columns) {
-            columnHandles.put(column.getName(), new DuckLakeColumnHandle(column.getName(), column.getType(), index));
+        for (DuckLakeColumnInfo info : columnInfos) {
+            columnHandles.put(
+                    info.columnName(),
+                    new DuckLakeColumnHandle(
+                            info.columnName(),
+                            DuckLakeTypeMapping.toTrinoType(info.columnType()),
+                            index,
+                            info.columnId()));
             index++;
         }
         return columnHandles.buildOrThrow();
@@ -115,15 +122,10 @@ public class DuckLakeMetadata
 
     private ConnectorTableMetadata getTableMetadata(SchemaTableName tableName)
     {
-        if (!listSchemaNames().contains(tableName.getSchemaName())) {
-            return null;
-        }
-
         List<ColumnMetadata> columns = duckLakeClient.getColumns(tableName.getSchemaName(), tableName.getTableName());
         if (columns == null) {
             return null;
         }
-
         return new ConnectorTableMetadata(tableName, columns);
     }
 

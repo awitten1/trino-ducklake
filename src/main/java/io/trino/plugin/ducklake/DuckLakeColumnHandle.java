@@ -15,16 +15,19 @@ public final class DuckLakeColumnHandle
     private final String columnName;
     private final Type columnType;
     private final int ordinalPosition;
+    private final long columnId;
 
     @JsonCreator
     public DuckLakeColumnHandle(
             @JsonProperty("columnName") String columnName,
             @JsonProperty("columnType") Type columnType,
-            @JsonProperty("ordinalPosition") int ordinalPosition)
+            @JsonProperty("ordinalPosition") int ordinalPosition,
+            @JsonProperty("columnId") long columnId)
     {
         this.columnName = requireNonNull(columnName, "columnName is null");
         this.columnType = requireNonNull(columnType, "columnType is null");
         this.ordinalPosition = ordinalPosition;
+        this.columnId = columnId;
     }
 
     @JsonProperty
@@ -43,6 +46,12 @@ public final class DuckLakeColumnHandle
     public int getOrdinalPosition()
     {
         return ordinalPosition;
+    }
+
+    @JsonProperty
+    public long getColumnId()
+    {
+        return columnId;
     }
 
     public ColumnMetadata getColumnMetadata()
@@ -77,6 +86,7 @@ public final class DuckLakeColumnHandle
                 .add("columnName", columnName)
                 .add("columnType", columnType)
                 .add("ordinalPosition", ordinalPosition)
+                .add("columnId", columnId)
                 .toString();
     }
 }

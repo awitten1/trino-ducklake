@@ -13,7 +13,7 @@ echo "Building plugin..."
 # Download Trino if needed
 if [ ! -d "${TRINO_DIR}" ]; then
     echo "Downloading Trino ${TRINO_VERSION}..."
-    curl -fSL -O "https://repo1.maven.org/maven2/io/trino/trino-server/${TRINO_VERSION}/${TRINO_TARBALL}"
+    curl -fSL -O "https://github.com/trinodb/trino/releases/download/${TRINO_VERSION}/${TRINO_TARBALL}"
     tar xzf "${TRINO_TARBALL}"
     rm "${TRINO_TARBALL}"
 fi
@@ -47,6 +47,7 @@ cat > "${TRINO_DIR}/etc/jvm.config" <<EOF
 -XX:PerBytecodeRecompilationCutoff=10000
 -Djdk.attach.allowAttachSelf=true
 -Djdk.nio.maxCachedBufferSize=2000000
+--enable-native-access=ALL-UNNAMED
 EOF
 
 cat > "${TRINO_DIR}/etc/config.properties" <<EOF
@@ -58,7 +59,7 @@ EOF
 
 cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
 connector.name=ducklake
-ducklake.metadata-connection-string=metadata.ducklake
+ducklake.metadata-connection-string=jdbc:sqlite:$(pwd)/metadata.sqlite
 EOF
 
 echo "Starting Trino on http://localhost:8080"
