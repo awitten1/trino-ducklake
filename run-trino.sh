@@ -60,6 +60,8 @@ EOF
 cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
 connector.name=ducklake
 ducklake.metadata-connection-string=jdbc:sqlite:$(pwd)/metadata.sqlite
+fs.native-local.enabled=true
+local.location=/
 EOF
 
 echo "Starting Trino on http://localhost:8080"

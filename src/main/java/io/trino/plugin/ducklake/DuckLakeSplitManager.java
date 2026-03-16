@@ -45,7 +45,8 @@ public class DuckLakeSplitManager
         List<DuckLakeDataFileInfo> dataFiles = client.getDataFiles(
                 tableHandle.getTableId(),
                 tableHandle.getSnapshotId(),
-                tableInfo);
+                tableInfo,
+                tableHandle.getConstraint());
 
         List<DuckLakeSplit> splits = dataFiles.stream()
                 .map(file -> new DuckLakeSplit(

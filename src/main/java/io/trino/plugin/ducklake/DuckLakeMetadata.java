@@ -11,9 +11,12 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.statistics.TableStatistics;
 
 import java.util.List;
 import java.util.Map;
@@ -55,7 +58,8 @@ public class DuckLakeMetadata
                         tableName.getSchemaName(),
                         tableName.getTableName(),
                         tis.tableInfo().tableId(),
-                        tis.snapshotId()))
+                        tis.snapshotId(),
+                        io.trino.spi.predicate.TupleDomain.all()))
                 .orElse(null);
     }
 
@@ -118,6 +122,33 @@ public class DuckLakeMetadata
     public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
     {
         return ((DuckLakeColumnHandle) columnHandle).getColumnMetadata();
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) table;
+        Map<ColumnHandle, io.trino.spi.predicate.Domain> supported = constraint.getSummary().getDomains()
+                .map(domains -> domains.entrySet().stream()
+                        .filter(entry -> entry.getKey() instanceof DuckLakeColumnHandle columnHandle && DuckLakeDomainUtils.isSupportedPredicateType(columnHandle.getColumnType()))
+                        .collect(ImmutableMap.toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)))
+                .orElseGet(ImmutableMap::of);
+        io.trino.spi.predicate.TupleDomain<ColumnHandle> newConstraint = handle.getConstraint()
+                .intersect(io.trino.spi.predicate.TupleDomain.withColumnDomains(supported));
+        if (newConstraint.equals(handle.getConstraint())) {
+            return Optional.empty();
+        }
+        return Optional.of(new ConstraintApplicationResult<>(
+                handle.withConstraint(newConstraint),
+                io.trino.spi.predicate.TupleDomain.all(),
+                constraint.getExpression(),
+                false));
+    }
+
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return duckLakeClient.getTableStatistics((DuckLakeTableHandle) tableHandle);
     }
 
     private ConnectorTableMetadata getTableMetadata(SchemaTableName tableName)

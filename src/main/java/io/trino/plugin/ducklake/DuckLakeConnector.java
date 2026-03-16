@@ -4,7 +4,7 @@ import com.google.inject.Inject;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorRecordSetProvider;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
@@ -19,19 +19,19 @@ public class DuckLakeConnector
     private final LifeCycleManager lifeCycleManager;
     private final DuckLakeMetadata metadata;
     private final DuckLakeSplitManager splitManager;
-    private final DuckLakeRecordSetProvider recordSetProvider;
+    private final DuckLakePageSourceProvider pageSourceProvider;
 
     @Inject
     public DuckLakeConnector(
             LifeCycleManager lifeCycleManager,
             DuckLakeMetadata metadata,
             DuckLakeSplitManager splitManager,
-            DuckLakeRecordSetProvider recordSetProvider)
+            DuckLakePageSourceProvider pageSourceProvider)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
-        this.recordSetProvider = requireNonNull(recordSetProvider, "recordSetProvider is null");
+        this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
     }
 
     @Override
@@ -53,9 +53,9 @@ public class DuckLakeConnector
     }
 
     @Override
-    public ConnectorRecordSetProvider getRecordSetProvider()
+    public ConnectorPageSourceProvider getPageSourceProvider()
     {
-        return recordSetProvider;
+        return pageSourceProvider;
     }
 
     @Override
