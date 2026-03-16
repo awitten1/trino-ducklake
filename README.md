@@ -27,9 +27,12 @@ Create `trino-server-479/etc/catalog/ducklake.properties`:
 
 ```properties
 connector.name=ducklake
-ducklake.metadata-connection-string=postgres:dbname=ducklake_catalog host=localhost
-ducklake.data-path=s3://my-bucket/data/
+ducklake.metadata-connection-string=jdbc:sqlite:/absolute/path/to/metadata.sqlite
+fs.native-local.enabled=true
+local.location=/
 ```
+
+`data_path` is read from `ducklake_metadata` inside the catalog metadata database. It is not configured as a connector property.
 
 Start Trino:
 

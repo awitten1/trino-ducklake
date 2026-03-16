@@ -41,16 +41,6 @@ public class DuckLakeConnectionManager
         return driverManagerConnect(metadataJdbcUrl, new Properties());
     }
 
-    /**
-     * Opens an in-memory DuckDB connection for reading Parquet data files
-     * via read_parquet(). The caller is responsible for closing the connection.
-     */
-    public Connection openDataConnection()
-            throws SQLException
-    {
-        return new org.duckdb.DuckDBDriver().connect("jdbc:duckdb:", new Properties());
-    }
-
     private static Connection driverManagerConnect(String url, Properties props)
             throws SQLException
     {

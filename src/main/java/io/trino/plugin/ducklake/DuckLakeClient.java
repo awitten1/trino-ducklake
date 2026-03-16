@@ -75,20 +75,6 @@ public class DuckLakeClient
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Data path
-    // -------------------------------------------------------------------------
-
-    public String getDataPath()
-    {
-        try (Connection conn = connectionManager.openMetadataConnection()) {
-            return queryDataPath(conn);
-        }
-        catch (SQLException e) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to read data path from ducklake_metadata", e);
-        }
-    }
-
     private String queryDataPath(Connection conn)
             throws SQLException
     {
