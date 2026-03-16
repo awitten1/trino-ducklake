@@ -13,7 +13,7 @@ A [Trino](https://trino.io/) connector for [DuckLake](https://ducklake.select/).
 Download and extract [Trino](https://trino.io/download.html):
 
 ```bash
-curl -O https://repo1.maven.org/maven2/io/trino/trino-server/479/trino-server-479.tar.gz
+curl -O https://github.com/trinodb/trino/releases/download/479/trino-server-479.tar.gz
 tar xzf trino-server-479.tar.gz
 ```
 

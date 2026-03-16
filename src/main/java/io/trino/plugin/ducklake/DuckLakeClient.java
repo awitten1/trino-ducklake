@@ -49,6 +49,8 @@ public class DuckLakeClient
         this.connectionManager = requireNonNull(connectionManager, "connectionManager is null");
     }
 
+    // These queries are taken from https://ducklake.select/docs/stable/specification/queries
+
     // -------------------------------------------------------------------------
     // Snapshot
     // -------------------------------------------------------------------------
