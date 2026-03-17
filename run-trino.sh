@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    echo "Usage: $0 [sqlite|postgres]"
+    echo ""
+    echo "Build the connector, install it into a local Trino, and start Trino."
+    echo ""
+    echo "Modes:"
+    echo "  sqlite    (default) Use metadata.sqlite as the metadata database"
+    echo "  postgres  Use PostgreSQL on localhost:5433 as the metadata database"
+    echo "            Requires: docker container 'ducklake-test-pg' on port 5433"
+    exit 1
+}
+
+MODE="${1:-sqlite}"
+
+case "$MODE" in
+    sqlite)
+        METADATA_CONN="jdbc:sqlite:$(pwd)/metadata.sqlite"
+        ;;
+    postgres)
+        METADATA_CONN="jdbc:postgresql://localhost:5433/ducklake_meta?user=postgres&password=testpass"
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "Unknown mode: $MODE"
+        usage
+        ;;
+esac
+
 TRINO_VERSION=479
 TRINO_DIR="trino-server-${TRINO_VERSION}"
 TRINO_TARBALL="${TRINO_DIR}.tar.gz"
@@ -59,10 +89,10 @@ EOF
 
 cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
 connector.name=ducklake
-ducklake.metadata-connection-string=jdbc:sqlite:$(pwd)/metadata.sqlite
+ducklake.metadata-connection-string=${METADATA_CONN}
 fs.native-local.enabled=true
 local.location=/
 EOF
 
-echo "Starting Trino on http://localhost:8080"
+echo "Starting Trino on http://localhost:8080 (mode: ${MODE})"
 exec "${TRINO_DIR}/bin/launcher" run
