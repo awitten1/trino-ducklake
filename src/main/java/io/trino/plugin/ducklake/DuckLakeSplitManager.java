@@ -12,6 +12,7 @@ import io.trino.spi.connector.FixedSplitSource;
 
 import java.util.List;
 
+
 import static java.util.Objects.requireNonNull;
 
 public class DuckLakeSplitManager
@@ -35,18 +36,7 @@ public class DuckLakeSplitManager
     {
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) connectorTableHandle;
 
-        // Resolve table path info needed for data file path construction
-        DuckLakeTableInfo tableInfo = client.getTableInfo(
-                        tableHandle.getSchemaName(),
-                        tableHandle.getTableName())
-                .orElseThrow(() -> new IllegalStateException(
-                        "Table not found: " + tableHandle.toSchemaTableName()));
-
-        List<DuckLakeDataFileInfo> dataFiles = client.getDataFiles(
-                tableHandle.getTableId(),
-                tableHandle.getSnapshotId(),
-                tableInfo,
-                tableHandle.getConstraint());
+        List<DuckLakeDataFileInfo> dataFiles = client.getDataFiles(tableHandle, tableHandle.getConstraint());
 
         List<DuckLakeSplit> splits = dataFiles.stream()
                 .map(file -> new DuckLakeSplit(

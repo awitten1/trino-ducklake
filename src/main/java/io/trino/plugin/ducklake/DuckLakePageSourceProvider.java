@@ -103,7 +103,7 @@ public class DuckLakePageSourceProvider
                     duckLakeSplit.getDataFilePath(),
                     readColumns,
                     duckLakeSplit.getDeleteFilePath().isPresent());
-            ConnectorPageSource pageSource = basePageSource;
+            ConnectorPageSource pageSource;
 
             if (duckLakeSplit.getDeleteFilePath().isEmpty()) {
                 pageSource = basePageSource;

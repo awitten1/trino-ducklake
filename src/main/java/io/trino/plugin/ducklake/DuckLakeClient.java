@@ -166,28 +166,6 @@ public class DuckLakeClient
         }
     }
 
-    public boolean tableExists(String schemaName, String tableName)
-    {
-        try (Connection conn = connectionManager.openMetadataConnection()) {
-            long snapshotId = getCurrentSnapshotId(conn);
-            return queryTableInfo(conn, schemaName, tableName, snapshotId).isPresent();
-        }
-        catch (SQLException e) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to check table existence", e);
-        }
-    }
-
-    public Optional<DuckLakeTableInfo> getTableInfo(String schemaName, String tableName)
-    {
-        try (Connection conn = connectionManager.openMetadataConnection()) {
-            long snapshotId = getCurrentSnapshotId(conn);
-            return queryTableInfo(conn, schemaName, tableName, snapshotId);
-        }
-        catch (SQLException e) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to get table info", e);
-        }
-    }
-
     /**
      * Returns both tableInfo and the snapshotId together, so callers capture a
      * consistent snapshot in a single connection.
@@ -252,12 +230,12 @@ public class DuckLakeClient
      */
     public List<ColumnMetadata> getColumns(String schemaName, String tableName)
     {
-        Optional<DuckLakeTableInfo> tableInfo = getTableInfo(schemaName, tableName);
-        if (tableInfo.isEmpty()) {
-            return null;
-        }
         try (Connection conn = connectionManager.openMetadataConnection()) {
             long snapshotId = getCurrentSnapshotId(conn);
+            Optional<DuckLakeTableInfo> tableInfo = queryTableInfo(conn, schemaName, tableName, snapshotId);
+            if (tableInfo.isEmpty()) {
+                return null;
+            }
             return queryColumnInfos(conn, tableInfo.get().tableId(), snapshotId).stream()
                     .map(info -> new ColumnMetadata(info.columnName(), DuckLakeTypeMapping.toTrinoType(info.columnType())))
                     .toList();
@@ -313,10 +291,14 @@ public class DuckLakeClient
     // Data files
     // -------------------------------------------------------------------------
 
-    public List<DuckLakeDataFileInfo> getDataFiles(long tableId, long snapshotId, DuckLakeTableInfo tableInfo, TupleDomain<ColumnHandle> constraint)
+    public List<DuckLakeDataFileInfo> getDataFiles(DuckLakeTableHandle tableHandle, TupleDomain<ColumnHandle> constraint)
     {
         try (Connection conn = connectionManager.openMetadataConnection()) {
             String dataPath = queryDataPath(conn);
+            long tableId = tableHandle.getTableId();
+            long snapshotId = tableHandle.getSnapshotId();
+            DuckLakeTableInfo tableInfo = queryTableInfo(conn, tableHandle.getSchemaName(), tableHandle.getTableName(), snapshotId)
+                    .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Table not found: " + tableHandle.toSchemaTableName()));
             Optional<Set<Long>> allowedDataFileIds = getAllowedDataFileIds(conn, tableId, constraint);
             if (allowedDataFileIds.isPresent() && allowedDataFileIds.orElseThrow().isEmpty()) {
                 return List.of();
@@ -387,10 +369,10 @@ public class DuckLakeClient
     {
         try (Connection conn = connectionManager.openMetadataConnection()) {
             TableStatistics.Builder builder = TableStatistics.builder();
-            try (PreparedStatement tableStatsStmt = conn.prepareStatement(
+            try (PreparedStatement stmt = conn.prepareStatement(
                     "SELECT record_count FROM ducklake_table_stats WHERE table_id = ?")) {
-                tableStatsStmt.setLong(1, tableHandle.getTableId());
-                try (ResultSet rs = tableStatsStmt.executeQuery()) {
+                stmt.setLong(1, tableHandle.getTableId());
+                try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
                         builder.setRowCount(Estimate.of(rs.getLong("record_count")));
                     }
@@ -398,8 +380,13 @@ public class DuckLakeClient
             }
 
             Map<String, DuckLakeColumnHandle> columnHandles = new HashMap<>();
-            for (Map.Entry<String, ColumnHandle> entry : getColumnHandleMap(tableHandle).entrySet()) {
-                columnHandles.put(entry.getKey(), (DuckLakeColumnHandle) entry.getValue());
+            int index = 0;
+            for (DuckLakeColumnInfo info : queryColumnInfos(conn, tableHandle.getTableId(), tableHandle.getSnapshotId())) {
+                columnHandles.put(info.columnName(), new DuckLakeColumnHandle(
+                        info.columnName(),
+                        DuckLakeTypeMapping.toTrinoType(info.columnType()),
+                        index++,
+                        info.columnId()));
             }
 
             String sql = """
@@ -420,9 +407,9 @@ public class DuckLakeClient
                             continue;
                         }
                         ColumnStatistics.Builder columnStats = ColumnStatistics.builder();
-                        long containsNull = rs.getLong("contains_null");
-                        if (!rs.wasNull()) {
-                            columnStats.setNullsFraction(Estimate.of(containsNull != 0 ? 1.0 : 0.0));
+                        boolean containsNull = rs.getBoolean("contains_null");
+                        if (!rs.wasNull() && !containsNull) {
+                            columnStats.setNullsFraction(Estimate.of(0.0));
                         }
                         buildDoubleRange(columnHandle.getColumnType(), rs.getString("min_value"), rs.getString("max_value"))
                                 .ifPresent(columnStats::setRange);
@@ -437,25 +424,10 @@ public class DuckLakeClient
         }
     }
 
-    private Map<String, ColumnHandle> getColumnHandleMap(DuckLakeTableHandle tableHandle)
-    {
-        List<DuckLakeColumnInfo> columnInfos = getColumnInfos(tableHandle.getTableId(), tableHandle.getSnapshotId());
-        Map<String, ColumnHandle> result = new HashMap<>();
-        int index = 0;
-        for (DuckLakeColumnInfo info : columnInfos) {
-            result.put(info.columnName(), new DuckLakeColumnHandle(
-                    info.columnName(),
-                    DuckLakeTypeMapping.toTrinoType(info.columnType()),
-                    index++,
-                    info.columnId()));
-        }
-        return result;
-    }
-
     private Optional<Set<Long>> getAllowedDataFileIds(Connection conn, long tableId, TupleDomain<ColumnHandle> constraint)
             throws SQLException
     {
-        if (constraint.isAll() || constraint.isNone() || constraint.getDomains().isEmpty()) {
+        if (constraint.isAll() || constraint.isNone()) {
             return constraint.isNone() ? Optional.of(Set.of()) : Optional.empty();
         }
 

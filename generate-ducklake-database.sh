@@ -2,7 +2,7 @@
 
 set -eux
 
-duckdb c "
+duckdb -c "
 install ducklake; load ducklake;
 attach 'ducklake:sqlite:metadata.sqlite' as my_ducklake (DATA_PATH 'data_files/');
 use my_ducklake;
