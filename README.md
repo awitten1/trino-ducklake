@@ -34,6 +34,27 @@ local.location=/
 
 `data_path` is read from `ducklake_metadata` inside the catalog metadata database. It is not configured as a connector property.
 
+### S3
+
+```properties
+connector.name=ducklake
+ducklake.metadata-connection-string=jdbc:postgresql://host/db
+fs.native-s3.enabled=true
+s3.region=us-east-1
+```
+
+Authentication uses Trino's standard S3 filesystem configuration (IAM roles, access keys, etc.).
+
+### GCS
+
+```properties
+connector.name=ducklake
+ducklake.metadata-connection-string=jdbc:postgresql://host/db
+fs.native-gcs.enabled=true
+```
+
+Authentication uses Trino's standard GCS filesystem configuration (service accounts, etc.).
+
 Start Trino:
 
 ```bash

@@ -34,6 +34,7 @@ public class DuckLakeConnectorFactory
                 new JsonModule(),
                 new TypeDeserializerModule(),
                 binder -> binder.bind(TypeManager.class).toInstance(typeManager),
+                binder -> binder.bind(io.opentelemetry.api.OpenTelemetry.class).toInstance(context.getOpenTelemetry()),
                 binder -> binder.bind(io.opentelemetry.api.trace.Tracer.class).toInstance(context.getTracer()),
                 new FileSystemModule(catalogName, context, false),
                 new DuckLakeModule());

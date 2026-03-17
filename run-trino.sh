@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 [sqlite|postgres]"
+    echo "Usage: $0 [sqlite|postgres|s3|gcs]"
     echo ""
     echo "Build the connector, install it into a local Trino, and start Trino."
     echo ""
@@ -10,6 +10,11 @@ usage() {
     echo "  sqlite    (default) Use metadata.sqlite as the metadata database"
     echo "  postgres  Use PostgreSQL on localhost:5433 as the metadata database"
     echo "            Requires: docker container 'ducklake-test-pg' on port 5433"
+    echo "  s3        Use PostgreSQL metadata + S3 data files"
+    echo "            Env vars: METADATA_CONN (default: postgres on localhost:5433)"
+    echo "                      S3_REGION (default: us-east-1)"
+    echo "  gcs       Use PostgreSQL metadata + GCS data files"
+    echo "            Env vars: METADATA_CONN (default: postgres on localhost:5433)"
     exit 1
 }
 
@@ -21,6 +26,13 @@ case "$MODE" in
         ;;
     postgres)
         METADATA_CONN="jdbc:postgresql://localhost:5433/ducklake_meta?user=postgres&password=testpass"
+        ;;
+    s3)
+        METADATA_CONN="${METADATA_CONN:-jdbc:postgresql://localhost:5433/ducklake_meta_s3?user=postgres&password=testpass}"
+        S3_REGION="${S3_REGION:-us-east-1}"
+        ;;
+    gcs)
+        METADATA_CONN="${METADATA_CONN:-jdbc:postgresql://localhost:5433/ducklake_meta_gcs?user=postgres&password=testpass}"
         ;;
     -h|--help|help)
         usage
@@ -87,12 +99,27 @@ http-server.http.port=8080
 discovery.uri=http://localhost:8080
 EOF
 
-cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
+if [ "$MODE" = "s3" ]; then
+    cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
+connector.name=ducklake
+ducklake.metadata-connection-string=${METADATA_CONN}
+fs.native-s3.enabled=true
+s3.region=${S3_REGION}
+EOF
+elif [ "$MODE" = "gcs" ]; then
+    cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
+connector.name=ducklake
+ducklake.metadata-connection-string=${METADATA_CONN}
+fs.native-gcs.enabled=true
+EOF
+else
+    cat > "${TRINO_DIR}/etc/catalog/ducklake.properties" <<EOF
 connector.name=ducklake
 ducklake.metadata-connection-string=${METADATA_CONN}
 fs.native-local.enabled=true
 local.location=/
 EOF
+fi
 
 echo "Starting Trino on http://localhost:8080 (mode: ${MODE})"
 exec "${TRINO_DIR}/bin/launcher" run

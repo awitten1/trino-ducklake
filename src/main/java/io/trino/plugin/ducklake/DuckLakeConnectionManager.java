@@ -37,15 +37,10 @@ public class DuckLakeConnectionManager
         if (metadataJdbcUrl.startsWith("jdbc:sqlite:")) {
             return new org.sqlite.JDBC().connect(metadataJdbcUrl, new Properties());
         }
-        // Fallback: try DriverManager for other databases (e.g. PostgreSQL)
-        return driverManagerConnect(metadataJdbcUrl, new Properties());
-    }
-
-    private static Connection driverManagerConnect(String url, Properties props)
-            throws SQLException
-    {
-        // Last-resort fallback for JDBC drivers not bundled in the plugin
-        return java.sql.DriverManager.getConnection(url, props);
+        if (metadataJdbcUrl.startsWith("jdbc:postgresql:")) {
+            return new org.postgresql.Driver().connect(metadataJdbcUrl, new Properties());
+        }
+        throw new SQLException("Unsupported JDBC URL: " + metadataJdbcUrl);
     }
 
     /**

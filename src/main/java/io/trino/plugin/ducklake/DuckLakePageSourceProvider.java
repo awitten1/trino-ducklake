@@ -53,7 +53,6 @@ import static io.trino.parquet.ParquetTypeUtils.getParquetTypeByName;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -224,10 +223,7 @@ public class DuckLakePageSourceProvider
         if (path.startsWith("/")) {
             return Location.of(Path.of(path).toUri().toString());
         }
-        if (path.startsWith("file:") || path.startsWith("local:")) {
-            return Location.of(path);
-        }
-        throw new TrinoException(NOT_SUPPORTED, "Only local DuckLake data files are currently supported: " + path);
+        return Location.of(path);
     }
 
     private static MessageType buildRequestedSchema(MessageType fileSchema, List<DuckLakeColumnHandle> columns)
