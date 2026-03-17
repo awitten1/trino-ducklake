@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./mvnw:*)",
+      "Bash(./run-trino.sh)",
+      "Bash(./generate-ducklake-database.sh)",
+      "Bash(trino-server-479/bin/launcher:*)",
+      "Bash(duckdb:*)",
+      "Bash(cp -r target/ducklake trino-server-479/plugin/ducklake)"
+    ]
+  }
+}
