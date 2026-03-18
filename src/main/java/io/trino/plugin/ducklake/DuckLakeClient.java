@@ -22,6 +22,7 @@ import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+import io.trino.spi.type.BooleanType;
 
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaNotFoundException;
@@ -867,7 +868,7 @@ public class DuckLakeClient
 
         // Insert columns
         try (PreparedStatement stmt = conn.prepareStatement(
-                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, nulls_allowed) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)")) {
+                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, default_value_type, default_value_dialect) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL)")) {
             for (int i = 0; i < columns.size(); i++) {
                 ColumnMetadata col = columns.get(i);
                 stmt.setLong(1, firstColumnId + i);
@@ -914,7 +915,9 @@ public class DuckLakeClient
 
                 String[] tables = {
                         "ducklake_table",
+                        "ducklake_partition_info",
                         "ducklake_column",
+                        "ducklake_column_tag",
                         "ducklake_data_file",
                         "ducklake_delete_file"
                 };
@@ -925,6 +928,12 @@ public class DuckLakeClient
                         stmt.setLong(2, tableId);
                         stmt.executeUpdate();
                     }
+                }
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "UPDATE ducklake_tag SET end_snapshot = ? WHERE object_id = ? AND end_snapshot IS NULL")) {
+                    stmt.setLong(1, snapshotId);
+                    stmt.setLong(2, tableId);
+                    stmt.executeUpdate();
                 }
 
                 conn.commit();
@@ -999,22 +1008,22 @@ public class DuckLakeClient
                 for (DuckLakeWrittenFileInfo file : files) {
                     // Insert data file
                     try (PreparedStatement stmt = conn.prepareStatement(
-                            "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, file_order) VALUES (?, ?, ?, NULL, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
+                            "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id, partial_max) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, NULL, NULL, NULL, NULL)")) {
                         stmt.setLong(1, fileId);
                         stmt.setLong(2, tableId);
                         stmt.setLong(3, snapshot.snapshotId());
-                        stmt.setString(4, file.path());
-                        stmt.setLong(5, file.recordCount());
-                        stmt.setLong(6, file.fileSizeBytes());
-                        stmt.setLong(7, file.footerSize());
-                        stmt.setLong(8, nextRowId);
-                        stmt.setLong(9, fileId); // file_order = data_file_id
+                        stmt.setLong(4, fileId); // file_order = data_file_id
+                        stmt.setString(5, file.path());
+                        stmt.setLong(6, file.recordCount());
+                        stmt.setLong(7, file.fileSizeBytes());
+                        stmt.setLong(8, file.footerSize());
+                        stmt.setLong(9, nextRowId);
                         stmt.executeUpdate();
                     }
 
                     // Insert file column stats
                     try (PreparedStatement stmt = conn.prepareStatement(
-                            "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, value_count, null_count, min_value, max_value) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+                            "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan, extra_stats) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, false, NULL)")) {
                         for (DuckLakeWrittenFileInfo.ColumnStats colStats : file.columnStats()) {
                             stmt.setLong(1, fileId);
                             stmt.setLong(2, tableId);
@@ -1064,36 +1073,91 @@ public class DuckLakeClient
     private void updateTableColumnStats(Connection conn, long tableId, DuckLakeWrittenFileInfo.ColumnStats colStats)
             throws SQLException
     {
-        // Use SQL expressions for min/max comparison since values are strings
-        String updateSql;
-        if (connectionManager.isPostgresql()) {
-            updateSql = "UPDATE ducklake_table_column_stats SET " +
-                    "contains_null = contains_null OR ? > 0, " +
-                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
-                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
-                    "WHERE table_id = ? AND column_id = ?";
+        Type type = getColumnType(conn, tableId, colStats.columnId());
+
+        String currentMin = null;
+        String currentMax = null;
+        boolean containsNull = false;
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "SELECT contains_null, min_value, max_value FROM ducklake_table_column_stats WHERE table_id = ? AND column_id = ?")) {
+            stmt.setLong(1, tableId);
+            stmt.setLong(2, colStats.columnId());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    containsNull = rs.getBoolean("contains_null");
+                    currentMin = rs.getString("min_value");
+                    currentMax = rs.getString("max_value");
+                }
+            }
         }
-        else {
-            updateSql = "UPDATE ducklake_table_column_stats SET " +
-                    "contains_null = contains_null OR ? > 0, " +
-                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
-                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
-                    "WHERE table_id = ? AND column_id = ?";
-        }
-        try (PreparedStatement stmt = conn.prepareStatement(updateSql)) {
-            stmt.setLong(1, colStats.nullCount());
-            stmt.setString(2, colStats.minValue());
-            stmt.setString(3, colStats.minValue());
-            stmt.setString(4, colStats.minValue());
-            stmt.setString(5, colStats.minValue());
-            stmt.setString(6, colStats.maxValue());
-            stmt.setString(7, colStats.maxValue());
-            stmt.setString(8, colStats.maxValue());
-            stmt.setString(9, colStats.maxValue());
-            stmt.setLong(10, tableId);
-            stmt.setLong(11, colStats.columnId());
+
+        String mergedMin = mergeMinValue(type, currentMin, colStats.minValue());
+        String mergedMax = mergeMaxValue(type, currentMax, colStats.maxValue());
+
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "UPDATE ducklake_table_column_stats SET contains_null = ?, min_value = ?, max_value = ? WHERE table_id = ? AND column_id = ?")) {
+            stmt.setBoolean(1, containsNull || colStats.nullCount() > 0);
+            stmt.setString(2, mergedMin);
+            stmt.setString(3, mergedMax);
+            stmt.setLong(4, tableId);
+            stmt.setLong(5, colStats.columnId());
             stmt.executeUpdate();
         }
+    }
+
+    private Type getColumnType(Connection conn, long tableId, long columnId)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "SELECT column_type FROM ducklake_column WHERE table_id = ? AND column_id = ? AND end_snapshot IS NULL")) {
+            stmt.setLong(1, tableId);
+            stmt.setLong(2, columnId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Column not found for stats update: table_id=" + tableId + ", column_id=" + columnId);
+                }
+                return DuckLakeTypeMapping.toTrinoType(rs.getString("column_type"));
+            }
+        }
+    }
+
+    private String mergeMinValue(Type type, String currentValue, String candidateValue)
+    {
+        if (currentValue == null) {
+            return candidateValue;
+        }
+        if (candidateValue == null) {
+            return currentValue;
+        }
+        return compareStatStrings(type, candidateValue, currentValue) < 0 ? candidateValue : currentValue;
+    }
+
+    private String mergeMaxValue(Type type, String currentValue, String candidateValue)
+    {
+        if (currentValue == null) {
+            return candidateValue;
+        }
+        if (candidateValue == null) {
+            return currentValue;
+        }
+        return compareStatStrings(type, candidateValue, currentValue) > 0 ? candidateValue : currentValue;
+    }
+
+    private int compareStatStrings(Type type, String left, String right)
+    {
+        if (type instanceof TinyintType || type instanceof SmallintType || type instanceof IntegerType || type instanceof BigintType || type instanceof DateType) {
+            return Long.compare(Long.parseLong(left), Long.parseLong(right));
+        }
+        if (type instanceof RealType || type instanceof DoubleType) {
+            return Double.compare(Double.parseDouble(left), Double.parseDouble(right));
+        }
+        if (type instanceof DecimalType) {
+            return new BigDecimal(left).compareTo(new BigDecimal(right));
+        }
+        if (type instanceof BooleanType) {
+            return Boolean.compare(Boolean.parseBoolean(left), Boolean.parseBoolean(right));
+        }
+        return left.compareTo(right);
     }
 
     /**
