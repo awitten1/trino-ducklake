@@ -23,11 +23,16 @@ import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
+import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.SchemaNotFoundException;
+import io.trino.spi.connector.TableNotFoundException;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,8 +40,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
 
 public class DuckLakeClient
@@ -549,6 +559,541 @@ public class DuckLakeClient
             return Optional.of(doubleValue);
         }
         return Optional.empty();
+    }
+
+    public String getDataPath()
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            return queryDataPath(conn);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to get data path", e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Write operations
+    // -------------------------------------------------------------------------
+
+    record SnapshotInfo(long snapshotId, long nextCatalogId, long nextFileId, long schemaVersion) {}
+
+    private SnapshotInfo createSnapshot(Connection conn, String changes, long catalogIdIncrement, long fileIdIncrement, boolean schemaChanged)
+            throws SQLException
+    {
+        // Read current snapshot info
+        String selectSql = connectionManager.isPostgresql()
+                ? "SELECT snapshot_id, next_catalog_id, next_file_id, schema_version FROM ducklake_snapshot WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot) FOR UPDATE"
+                : "SELECT snapshot_id, next_catalog_id, next_file_id, schema_version FROM ducklake_snapshot WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot)";
+
+        long currentSnapshotId;
+        long nextCatalogId;
+        long nextFileId;
+        long schemaVersion;
+
+        try (PreparedStatement stmt = conn.prepareStatement(selectSql);
+             ResultSet rs = stmt.executeQuery()) {
+            if (!rs.next()) {
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "DuckLake catalog has no snapshots");
+            }
+            currentSnapshotId = rs.getLong("snapshot_id");
+            nextCatalogId = rs.getLong("next_catalog_id");
+            nextFileId = rs.getLong("next_file_id");
+            schemaVersion = rs.getLong("schema_version");
+        }
+
+        long newSnapshotId = currentSnapshotId + 1;
+        long newNextCatalogId = nextCatalogId + catalogIdIncrement;
+        long newNextFileId = nextFileId + fileIdIncrement;
+        long newSchemaVersion = schemaChanged ? schemaVersion + 1 : schemaVersion;
+
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_snapshot (snapshot_time, snapshot_id, schema_version, next_catalog_id, next_file_id) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?)")) {
+            stmt.setLong(1, newSnapshotId);
+            stmt.setLong(2, newSchemaVersion);
+            stmt.setLong(3, newNextCatalogId);
+            stmt.setLong(4, newNextFileId);
+            stmt.executeUpdate();
+        }
+
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (?, ?)")) {
+            stmt.setLong(1, newSnapshotId);
+            stmt.setString(2, changes);
+            stmt.executeUpdate();
+        }
+
+        return new SnapshotInfo(newSnapshotId, nextCatalogId, nextFileId, newSchemaVersion);
+    }
+
+    // -------------------------------------------------------------------------
+    // Schema DDL
+    // -------------------------------------------------------------------------
+
+    public void createSchema(String schemaName)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // Check if schema already exists
+                long currentSnapshotId = getCurrentSnapshotId(conn);
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            throw new TrinoException(ALREADY_EXISTS, "Schema already exists: " + schemaName);
+                        }
+                    }
+                }
+
+                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_SCHEMA", 1, 0, true);
+                long schemaId = snapshot.nextCatalogId();
+
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name) VALUES (?, ?, ?, NULL, ?)")) {
+                    stmt.setLong(1, schemaId);
+                    stmt.setString(2, UUID.randomUUID().toString());
+                    stmt.setLong(3, snapshot.snapshotId());
+                    stmt.setString(4, schemaName);
+                    stmt.executeUpdate();
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to create schema: " + schemaName, e);
+        }
+    }
+
+    public void dropSchema(String schemaName, boolean cascade)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                long currentSnapshotId = getCurrentSnapshotId(conn);
+
+                // Find the schema
+                long schemaId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new TrinoException(SCHEMA_NOT_FOUND, "Schema does not exist: " + schemaName);
+                        }
+                        schemaId = rs.getLong("schema_id");
+                    }
+                }
+
+                // Check if schema has tables
+                if (!cascade) {
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "SELECT table_id FROM ducklake_table WHERE schema_id = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) LIMIT 1")) {
+                        stmt.setLong(1, schemaId);
+                        stmt.setLong(2, currentSnapshotId);
+                        stmt.setLong(3, currentSnapshotId);
+                        try (ResultSet rs = stmt.executeQuery()) {
+                            if (rs.next()) {
+                                throw new TrinoException(SCHEMA_NOT_EMPTY, "Schema is not empty: " + schemaName);
+                            }
+                        }
+                    }
+                }
+
+                SnapshotInfo snapshot = createSnapshot(conn, "DROP_SCHEMA", 0, 0, true);
+
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "UPDATE ducklake_schema SET end_snapshot = ? WHERE schema_id = ? AND end_snapshot IS NULL")) {
+                    stmt.setLong(1, snapshot.snapshotId());
+                    stmt.setLong(2, schemaId);
+                    stmt.executeUpdate();
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to drop schema: " + schemaName, e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Table DDL
+    // -------------------------------------------------------------------------
+
+    public void createTable(String schemaName, String tableName, List<ColumnMetadata> columns)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                long currentSnapshotId = getCurrentSnapshotId(conn);
+
+                // Find schema
+                long schemaId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new TrinoException(SCHEMA_NOT_FOUND, "Schema does not exist: " + schemaName);
+                        }
+                        schemaId = rs.getLong("schema_id");
+                    }
+                }
+
+                // Check if table already exists
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT table_id FROM ducklake_table WHERE schema_id = ? AND table_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setLong(1, schemaId);
+                    stmt.setString(2, tableName);
+                    stmt.setLong(3, currentSnapshotId);
+                    stmt.setLong(4, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            throw new TrinoException(ALREADY_EXISTS, "Table already exists: " + schemaName + "." + tableName);
+                        }
+                    }
+                }
+
+                // Need 1 ID for table + 1 per column
+                long catalogIdIncrement = 1 + columns.size();
+                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_TABLE", catalogIdIncrement, 0, true);
+                long tableId = snapshot.nextCatalogId();
+
+                createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, snapshot.nextCatalogId() + 1);
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to create table: " + schemaName + "." + tableName, e);
+        }
+    }
+
+    /**
+     * Creates a table and returns the tableId and column handles. Used by both createTable and beginCreateTable.
+     */
+    record CreateTableResult(long tableId, List<DuckLakeColumnHandle> columnHandles, String schemaPath, String tablePath) {}
+
+    CreateTableResult createTableReturningInfo(String schemaName, String tableName, List<ColumnMetadata> columns)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                long currentSnapshotId = getCurrentSnapshotId(conn);
+
+                // Find schema
+                long schemaId;
+                String schemaPath;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id, path FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new TrinoException(SCHEMA_NOT_FOUND, "Schema does not exist: " + schemaName);
+                        }
+                        schemaId = rs.getLong("schema_id");
+                        schemaPath = rs.getString("path");
+                    }
+                }
+
+                long catalogIdIncrement = 1 + columns.size();
+                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_TABLE", catalogIdIncrement, 0, true);
+                long tableId = snapshot.nextCatalogId();
+                long firstColumnId = snapshot.nextCatalogId() + 1;
+
+                String tablePath = createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, firstColumnId);
+
+                // Build column handles
+                List<DuckLakeColumnHandle> columnHandles = new ArrayList<>();
+                for (int i = 0; i < columns.size(); i++) {
+                    ColumnMetadata col = columns.get(i);
+                    columnHandles.add(new DuckLakeColumnHandle(
+                            col.getName(),
+                            col.getType(),
+                            i,
+                            firstColumnId + i));
+                }
+
+                conn.commit();
+                return new CreateTableResult(tableId, columnHandles, schemaPath, tablePath);
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to create table: " + schemaName + "." + tableName, e);
+        }
+    }
+
+    private String createTableInternal(Connection conn, long tableId, long schemaId, long snapshotId, String tableName, List<ColumnMetadata> columns, long firstColumnId)
+            throws SQLException
+    {
+        // Insert table
+        String tablePath = tableName;
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
+            stmt.setLong(1, tableId);
+            stmt.setString(2, UUID.randomUUID().toString());
+            stmt.setLong(3, snapshotId);
+            stmt.setLong(4, schemaId);
+            stmt.setString(5, tableName);
+            stmt.setString(6, tablePath);
+            stmt.executeUpdate();
+        }
+
+        // Insert columns
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, nulls_allowed) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)")) {
+            for (int i = 0; i < columns.size(); i++) {
+                ColumnMetadata col = columns.get(i);
+                stmt.setLong(1, firstColumnId + i);
+                stmt.setLong(2, snapshotId);
+                stmt.setLong(3, tableId);
+                stmt.setInt(4, i);
+                stmt.setString(5, col.getName());
+                stmt.setString(6, DuckLakeTypeMapping.toDuckLakeType(col.getType()));
+                stmt.setBoolean(7, true);
+                stmt.addBatch();
+            }
+            stmt.executeBatch();
+        }
+
+        // Insert initial table stats
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) VALUES (?, 0, 0, 0)")) {
+            stmt.setLong(1, tableId);
+            stmt.executeUpdate();
+        }
+
+        // Insert initial column stats
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan, min_value, max_value) VALUES (?, ?, false, false, NULL, NULL)")) {
+            for (int i = 0; i < columns.size(); i++) {
+                stmt.setLong(1, tableId);
+                stmt.setLong(2, firstColumnId + i);
+                stmt.addBatch();
+            }
+            stmt.executeBatch();
+        }
+
+        return tablePath;
+    }
+
+    public void dropTable(DuckLakeTableHandle tableHandle)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                SnapshotInfo snapshot = createSnapshot(conn, "DROP_TABLE", 0, 0, true);
+                long tableId = tableHandle.getTableId();
+                long snapshotId = snapshot.snapshotId();
+
+                String[] tables = {
+                        "ducklake_table",
+                        "ducklake_column",
+                        "ducklake_data_file",
+                        "ducklake_delete_file"
+                };
+                for (String table : tables) {
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "UPDATE " + table + " SET end_snapshot = ? WHERE table_id = ? AND end_snapshot IS NULL")) {
+                        stmt.setLong(1, snapshotId);
+                        stmt.setLong(2, tableId);
+                        stmt.executeUpdate();
+                    }
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to drop table", e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // INSERT / CTAS - file registration
+    // -------------------------------------------------------------------------
+
+    public record InsertContext(String dataPath, String schemaPath, String tablePath, List<DuckLakeColumnHandle> columns) {}
+
+    public InsertContext getInsertContext(DuckLakeTableHandle tableHandle)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            String dataPath = queryDataPath(conn);
+            DuckLakeTableInfo tableInfo = queryTableInfo(conn, tableHandle.getSchemaName(), tableHandle.getTableName(), tableHandle.getSnapshotId())
+                    .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Table not found: " + tableHandle.toSchemaTableName()));
+            List<DuckLakeColumnInfo> columnInfos = queryColumnInfos(conn, tableHandle.getTableId(), tableHandle.getSnapshotId());
+            List<DuckLakeColumnHandle> columnHandles = new ArrayList<>();
+            int index = 0;
+            for (DuckLakeColumnInfo info : columnInfos) {
+                columnHandles.add(new DuckLakeColumnHandle(
+                        info.columnName(),
+                        DuckLakeTypeMapping.toTrinoType(info.columnType()),
+                        index++,
+                        info.columnId()));
+            }
+            return new InsertContext(dataPath, tableInfo.schemaPath(), tableInfo.tablePath(), columnHandles);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to get insert context", e);
+        }
+    }
+
+    public void finishInsert(long tableId, List<DuckLakeWrittenFileInfo> files)
+    {
+        if (files.isEmpty()) {
+            return;
+        }
+
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                SnapshotInfo snapshot = createSnapshot(conn, "INSERT", 0, files.size(), false);
+
+                // Read current next_row_id
+                long nextRowId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT next_row_id FROM ducklake_table_stats WHERE table_id = ?")) {
+                    stmt.setLong(1, tableId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new TrinoException(GENERIC_INTERNAL_ERROR, "No table stats found for table_id=" + tableId);
+                        }
+                        nextRowId = rs.getLong("next_row_id");
+                    }
+                }
+
+                long fileId = snapshot.nextFileId();
+                long totalRecords = 0;
+                long totalFileSize = 0;
+
+                for (DuckLakeWrittenFileInfo file : files) {
+                    // Insert data file
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, file_order) VALUES (?, ?, ?, NULL, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
+                        stmt.setLong(1, fileId);
+                        stmt.setLong(2, tableId);
+                        stmt.setLong(3, snapshot.snapshotId());
+                        stmt.setString(4, file.path());
+                        stmt.setLong(5, file.recordCount());
+                        stmt.setLong(6, file.fileSizeBytes());
+                        stmt.setLong(7, file.footerSize());
+                        stmt.setLong(8, nextRowId);
+                        stmt.setLong(9, fileId); // file_order = data_file_id
+                        stmt.executeUpdate();
+                    }
+
+                    // Insert file column stats
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, value_count, null_count, min_value, max_value) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+                        for (DuckLakeWrittenFileInfo.ColumnStats colStats : file.columnStats()) {
+                            stmt.setLong(1, fileId);
+                            stmt.setLong(2, tableId);
+                            stmt.setLong(3, colStats.columnId());
+                            stmt.setLong(4, colStats.valueCount());
+                            stmt.setLong(5, colStats.nullCount());
+                            stmt.setString(6, colStats.minValue());
+                            stmt.setString(7, colStats.maxValue());
+                            stmt.addBatch();
+                        }
+                        stmt.executeBatch();
+                    }
+
+                    // Update table column stats
+                    for (DuckLakeWrittenFileInfo.ColumnStats colStats : file.columnStats()) {
+                        updateTableColumnStats(conn, tableId, colStats);
+                    }
+
+                    nextRowId += file.recordCount();
+                    totalRecords += file.recordCount();
+                    totalFileSize += file.fileSizeBytes();
+                    fileId++;
+                }
+
+                // Update table stats
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "UPDATE ducklake_table_stats SET record_count = record_count + ?, next_row_id = ?, file_size_bytes = file_size_bytes + ? WHERE table_id = ?")) {
+                    stmt.setLong(1, totalRecords);
+                    stmt.setLong(2, nextRowId);
+                    stmt.setLong(3, totalFileSize);
+                    stmt.setLong(4, tableId);
+                    stmt.executeUpdate();
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to register inserted files", e);
+        }
+    }
+
+    private void updateTableColumnStats(Connection conn, long tableId, DuckLakeWrittenFileInfo.ColumnStats colStats)
+            throws SQLException
+    {
+        // Use SQL expressions for min/max comparison since values are strings
+        String updateSql;
+        if (connectionManager.isPostgresql()) {
+            updateSql = "UPDATE ducklake_table_column_stats SET " +
+                    "contains_null = contains_null OR ? > 0, " +
+                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
+                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
+                    "WHERE table_id = ? AND column_id = ?";
+        }
+        else {
+            updateSql = "UPDATE ducklake_table_column_stats SET " +
+                    "contains_null = contains_null OR ? > 0, " +
+                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
+                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
+                    "WHERE table_id = ? AND column_id = ?";
+        }
+        try (PreparedStatement stmt = conn.prepareStatement(updateSql)) {
+            stmt.setLong(1, colStats.nullCount());
+            stmt.setString(2, colStats.minValue());
+            stmt.setString(3, colStats.minValue());
+            stmt.setString(4, colStats.minValue());
+            stmt.setString(5, colStats.minValue());
+            stmt.setString(6, colStats.maxValue());
+            stmt.setString(7, colStats.maxValue());
+            stmt.setString(8, colStats.maxValue());
+            stmt.setString(9, colStats.maxValue());
+            stmt.setLong(10, tableId);
+            stmt.setLong(11, colStats.columnId());
+            stmt.executeUpdate();
+        }
     }
 
     /**

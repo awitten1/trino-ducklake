@@ -26,6 +26,53 @@ public class DuckLakeTypeMapping
 
     private DuckLakeTypeMapping() {}
 
+    public static String toDuckLakeType(Type trinoType)
+    {
+        if (trinoType instanceof io.trino.spi.type.BooleanType) {
+            return "BOOLEAN";
+        }
+        if (trinoType instanceof TinyintType) {
+            return "TINYINT";
+        }
+        if (trinoType instanceof SmallintType) {
+            return "SMALLINT";
+        }
+        if (trinoType instanceof IntegerType) {
+            return "INT";
+        }
+        if (trinoType instanceof BigintType) {
+            return "BIGINT";
+        }
+        if (trinoType instanceof RealType) {
+            return "FLOAT";
+        }
+        if (trinoType instanceof DoubleType) {
+            return "DOUBLE";
+        }
+        if (trinoType instanceof DecimalType decimalType) {
+            return "DECIMAL(" + decimalType.getPrecision() + ", " + decimalType.getScale() + ")";
+        }
+        if (trinoType instanceof VarcharType) {
+            return "VARCHAR";
+        }
+        if (trinoType instanceof VarbinaryType) {
+            return "BLOB";
+        }
+        if (trinoType instanceof DateType) {
+            return "DATE";
+        }
+        if (trinoType instanceof TimestampWithTimeZoneType) {
+            return "TIMESTAMPTZ";
+        }
+        if (trinoType instanceof TimestampType) {
+            return "TIMESTAMP";
+        }
+        if (trinoType instanceof UuidType) {
+            return "UUID";
+        }
+        return "VARCHAR";
+    }
+
     public static Type toTrinoType(String duckLakeType)
     {
         if (duckLakeType == null) {

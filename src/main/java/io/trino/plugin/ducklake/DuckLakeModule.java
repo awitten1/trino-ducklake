@@ -18,6 +18,7 @@ public class DuckLakeModule
         binder.bind(DuckLakeClient.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakePageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakePageSinkProvider.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(DuckLakeConfig.class);
     }
 }

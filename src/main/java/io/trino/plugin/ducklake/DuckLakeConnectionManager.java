@@ -13,11 +13,18 @@ import static java.util.Objects.requireNonNull;
 public class DuckLakeConnectionManager
 {
     private final String metadataJdbcUrl;
+    private final boolean isPostgresql;
 
     @Inject
     public DuckLakeConnectionManager(DuckLakeConfig config)
     {
         this.metadataJdbcUrl = requireNonNull(config.getMetadataConnectionString(), "metadataConnectionString is null");
+        this.isPostgresql = metadataJdbcUrl.startsWith("jdbc:postgresql:");
+    }
+
+    public boolean isPostgresql()
+    {
+        return isPostgresql;
     }
 
     /**
@@ -30,9 +37,7 @@ public class DuckLakeConnectionManager
             throws SQLException
     {
         if (metadataJdbcUrl.startsWith("jdbc:duckdb:")) {
-            Properties props = new Properties();
-            props.setProperty("duckdb.read_only", "true");
-            return new org.duckdb.DuckDBDriver().connect(metadataJdbcUrl, props);
+            return new org.duckdb.DuckDBDriver().connect(metadataJdbcUrl, new Properties());
         }
         if (metadataJdbcUrl.startsWith("jdbc:sqlite:")) {
             return new org.sqlite.JDBC().connect(metadataJdbcUrl, new Properties());

@@ -60,3 +60,46 @@ Start Trino:
 ```bash
 trino-server-479/bin/launcher run
 ```
+
+## Docker Compose
+
+The included `docker-compose.yml` provides ready-to-use profiles for different storage backends.
+
+### SQLite (local files)
+
+```bash
+docker compose --profile sqlite up
+```
+
+Mounts `metadata.sqlite` and `data_files/` from the project directory. Generate test data first with `./generate-ducklake-database.sh`.
+
+### PostgreSQL (local files)
+
+```bash
+docker compose --profile postgres up
+```
+
+Starts Trino with a PostgreSQL sidecar for metadata storage. Data files are mounted from `data_files_pg/`.
+
+### MinIO (S3-compatible object storage)
+
+```bash
+docker compose --profile minio up
+```
+
+Starts Trino + PostgreSQL + MinIO. The `ducklake` bucket is created automatically.
+
+- Trino: `http://localhost:8080`
+- MinIO Console: `http://localhost:9001` (login: `minioadmin` / `minioadmin`)
+- MinIO API: `http://localhost:9000`
+
+### Environment variables
+
+The Docker image is configured via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `METADATA_CONNECTION_STRING` | JDBC URL for the metadata database | `jdbc:sqlite:/data/metadata.sqlite` (local) or `jdbc:postgresql://postgres:5432/ducklake_meta?...` (s3/gcs) |
+| `FS_MODE` | Filesystem mode: `local`, `s3`, or `gcs` | `local` |
+| `S3_REGION` | AWS region (for `s3` mode) | `us-east-1` |
+| `S3_ENDPOINT` | Custom S3 endpoint (for MinIO or other S3-compatible stores) | *(none)* |

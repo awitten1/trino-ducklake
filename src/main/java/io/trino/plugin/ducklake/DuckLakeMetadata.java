@@ -3,31 +3,46 @@ package io.trino.plugin.ducklake;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
+import io.airlift.json.JsonCodec;
+import io.airlift.slice.Slice;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.security.TrinoPrincipal;
+import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.TableStatistics;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 public class DuckLakeMetadata
         implements ConnectorMetadata
 {
+    private static final JsonCodec<DuckLakeWrittenFileInfo> FILE_INFO_CODEC = JsonCodec.jsonCodec(DuckLakeWrittenFileInfo.class);
+
     private final DuckLakeClient duckLakeClient;
 
     @Inject
@@ -149,6 +164,136 @@ public class DuckLakeMetadata
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         return duckLakeClient.getTableStatistics((DuckLakeTableHandle) tableHandle);
+    }
+
+    // -------------------------------------------------------------------------
+    // Schema DDL
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        duckLakeClient.createSchema(schemaName);
+    }
+
+    @Override
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
+    {
+        duckLakeClient.dropSchema(schemaName, cascade);
+    }
+
+    // -------------------------------------------------------------------------
+    // Table DDL
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
+    {
+        SchemaTableName tableName = tableMetadata.getTable();
+        if (saveMode == SaveMode.REPLACE) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+        if (saveMode == SaveMode.IGNORE) {
+            // Check if table exists; if so, silently return
+            if (duckLakeClient.getTableInfoWithSnapshot(tableName.getSchemaName(), tableName.getTableName()).isPresent()) {
+                return;
+            }
+        }
+        duckLakeClient.createTable(tableName.getSchemaName(), tableName.getTableName(), tableMetadata.getColumns());
+    }
+
+    @Override
+    public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        duckLakeClient.dropTable((DuckLakeTableHandle) tableHandle);
+    }
+
+    // -------------------------------------------------------------------------
+    // INSERT
+    // -------------------------------------------------------------------------
+
+    @Override
+    public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeClient.InsertContext ctx = duckLakeClient.getInsertContext(handle);
+        return new DuckLakeInsertTableHandle(
+                handle.getTableId(),
+                ctx.columns(),
+                ctx.dataPath(),
+                ctx.schemaPath(),
+                ctx.tablePath());
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishInsert(
+            ConnectorSession session,
+            ConnectorInsertTableHandle insertHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DuckLakeInsertTableHandle handle = (DuckLakeInsertTableHandle) insertHandle;
+        List<DuckLakeWrittenFileInfo> files = parseFragments(fragments);
+        duckLakeClient.finishInsert(handle.getTableId(), files);
+        return Optional.empty();
+    }
+
+    // -------------------------------------------------------------------------
+    // CREATE TABLE AS SELECT (CTAS)
+    // -------------------------------------------------------------------------
+
+    @Override
+    public ConnectorOutputTableHandle beginCreateTable(
+            ConnectorSession session,
+            ConnectorTableMetadata tableMetadata,
+            Optional<ConnectorTableLayout> layout,
+            RetryMode retryMode,
+            boolean replace)
+    {
+        if (replace) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+        SchemaTableName tableName = tableMetadata.getTable();
+        String dataPath = duckLakeClient.getDataPath();
+        DuckLakeClient.CreateTableResult result = duckLakeClient.createTableReturningInfo(
+                tableName.getSchemaName(),
+                tableName.getTableName(),
+                tableMetadata.getColumns());
+
+        return new DuckLakeOutputTableHandle(
+                tableName.getSchemaName(),
+                tableName.getTableName(),
+                result.columnHandles(),
+                result.tableId(),
+                0, // snapshotId not needed for CTAS handle
+                dataPath,
+                result.schemaPath(),
+                result.tablePath());
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishCreateTable(
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DuckLakeOutputTableHandle handle = (DuckLakeOutputTableHandle) tableHandle;
+        List<DuckLakeWrittenFileInfo> files = parseFragments(fragments);
+        if (!files.isEmpty()) {
+            duckLakeClient.finishInsert(handle.getTableId(), files);
+        }
+        return Optional.empty();
+    }
+
+    private List<DuckLakeWrittenFileInfo> parseFragments(Collection<Slice> fragments)
+    {
+        List<DuckLakeWrittenFileInfo> files = new ArrayList<>();
+        for (Slice fragment : fragments) {
+            files.add(FILE_INFO_CODEC.fromJson(fragment.getBytes()));
+        }
+        return files;
     }
 
     private ConnectorTableMetadata getTableMetadata(SchemaTableName tableName)
