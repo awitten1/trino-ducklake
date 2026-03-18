@@ -157,23 +157,11 @@ public class DuckLakePageSink
             throws IOException
     {
         String fileName = UUID.randomUUID() + ".parquet";
-        StringBuilder fullPath = new StringBuilder(dataPath);
-        if (schemaPath != null && !schemaPath.isEmpty()) {
-            fullPath.append(schemaPath);
-            if (!schemaPath.endsWith("/")) {
-                fullPath.append("/");
-            }
-        }
-        if (tablePath != null && !tablePath.isEmpty()) {
-            fullPath.append(tablePath);
-            if (!tablePath.endsWith("/")) {
-                fullPath.append("/");
-            }
-        }
-        fullPath.append(fileName);
+        String tableDirectoryPath = buildTableDirectoryPath();
+        String fullPath = tableDirectoryPath + fileName;
 
         currentRelativePath = fileName;
-        currentFilePath = fullPath.toString();
+        currentFilePath = fullPath;
         currentFileRowCount = 0;
 
         // Initialize per-column stats
@@ -193,6 +181,8 @@ public class DuckLakePageSink
 
         ParquetWriterOptions writerOptions = ParquetWriterOptions.builder().build();
 
+        ensureTableDirectoryExists(tableDirectoryPath);
+
         Location location = toLocation(currentFilePath);
         currentOutputStream = fileSystem.newOutputFile(location).create();
 
@@ -205,6 +195,30 @@ public class DuckLakePageSink
                 "trino-ducklake",
                 Optional.empty(),
                 Optional.empty());
+    }
+
+    private void ensureTableDirectoryExists(String tableDirectoryPath)
+            throws IOException
+    {
+        fileSystem.createDirectory(toLocation(tableDirectoryPath));
+    }
+
+    private String buildTableDirectoryPath()
+    {
+        StringBuilder fullPath = new StringBuilder(dataPath);
+        if (schemaPath != null && !schemaPath.isEmpty()) {
+            fullPath.append(schemaPath);
+            if (!schemaPath.endsWith("/")) {
+                fullPath.append("/");
+            }
+        }
+        if (tablePath != null && !tablePath.isEmpty()) {
+            fullPath.append(tablePath);
+            if (!tablePath.endsWith("/")) {
+                fullPath.append("/");
+            }
+        }
+        return fullPath.toString();
     }
 
     private void closeCurrentFile()

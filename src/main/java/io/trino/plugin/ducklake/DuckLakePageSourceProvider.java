@@ -85,13 +85,16 @@ public class DuckLakePageSourceProvider
     {
         DuckLakeSplit duckLakeSplit = (DuckLakeSplit) split;
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) table;
+        boolean mergeRowIdRequested = columns.stream().anyMatch(DuckLakeMergeRowIdHandle.class::isInstance);
         List<DuckLakeColumnHandle> duckLakeColumns = columns.stream()
+                .filter(DuckLakeColumnHandle.class::isInstance)
                 .map(DuckLakeColumnHandle.class::cast)
                 .toList();
         List<DuckLakeColumnHandle> readColumns = buildReadColumns(duckLakeColumns, tableHandle.getConstraint());
         Map<Integer, Domain> filterDomainsByChannel = buildFilterDomainsByChannel(readColumns, tableHandle.getConstraint());
+        boolean needsRowNumberColumn = duckLakeSplit.getDeleteFilePath().isPresent() || mergeRowIdRequested;
 
-        if (duckLakeColumns.isEmpty() && duckLakeSplit.getDeleteFilePath().isEmpty() && filterDomainsByChannel.isEmpty()) {
+        if (duckLakeColumns.isEmpty() && !mergeRowIdRequested && duckLakeSplit.getDeleteFilePath().isEmpty() && filterDomainsByChannel.isEmpty()) {
             return new FixedPageSource(emptyPages(duckLakeSplit.getRecordCount()));
         }
 
@@ -101,7 +104,7 @@ public class DuckLakePageSourceProvider
                     fileSystem,
                     duckLakeSplit.getDataFilePath(),
                     readColumns,
-                    duckLakeSplit.getDeleteFilePath().isPresent());
+                    needsRowNumberColumn);
             ConnectorPageSource pageSource;
 
             if (duckLakeSplit.getDeleteFilePath().isEmpty()) {
@@ -119,22 +122,45 @@ public class DuckLakePageSourceProvider
                                 duckLakeSplit.getDeleteFilePath().orElseThrow(),
                                 duckLakeSplit.getDataFilePath(),
                                 duckLakeSplit.getRowIdStart()),
-                        duckLakeSplit.getRowIdStart(),
-                        readColumns.size());
+                        duckLakeSplit.getRowIdStart());
             }
 
-            if (!filterDomainsByChannel.isEmpty() || readColumns.size() != duckLakeColumns.size()) {
+            if (!filterDomainsByChannel.isEmpty()) {
                 pageSource = new DuckLakeConstraintFilteringPageSource(
                         pageSource,
                         readColumns,
-                        duckLakeColumns.size(),
                         filterDomainsByChannel);
+            }
+            if (needsProjection(columns, readColumns, needsRowNumberColumn)) {
+                pageSource = new DuckLakeProjectionPageSource(
+                        pageSource,
+                        columns,
+                        readColumns,
+                        needsRowNumberColumn,
+                        duckLakeSplit.getDataFileId(),
+                        duckLakeSplit.getDataFilePath());
             }
             return pageSource;
         }
         catch (IOException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to create page source for " + duckLakeSplit.getDataFilePath(), e);
         }
+    }
+
+    private static boolean needsProjection(List<ColumnHandle> requestedColumns, List<DuckLakeColumnHandle> readColumns, boolean hasRowNumberChannel)
+    {
+        if (hasRowNumberChannel) {
+            return true;
+        }
+        if (requestedColumns.size() != readColumns.size()) {
+            return true;
+        }
+        for (int index = 0; index < requestedColumns.size(); index++) {
+            if (!requestedColumns.get(index).equals(readColumns.get(index))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<DuckLakeColumnHandle> buildReadColumns(List<DuckLakeColumnHandle> visibleColumns, TupleDomain<ColumnHandle> constraint)
@@ -144,6 +170,7 @@ public class DuckLakePageSourceProvider
             readColumns.put(column.getColumnName(), column);
         }
         constraint.getDomains().ifPresent(domains -> domains.keySet().stream()
+                .filter(DuckLakeColumnHandle.class::isInstance)
                 .map(DuckLakeColumnHandle.class::cast)
                 .filter(column -> DuckLakeDomainUtils.isSupportedPredicateType(column.getColumnType()))
                 .forEach(column -> readColumns.putIfAbsent(column.getColumnName(), column)));

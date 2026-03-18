@@ -40,6 +40,7 @@ public class DuckLakeSplitManager
 
         List<DuckLakeSplit> splits = dataFiles.stream()
                 .map(file -> new DuckLakeSplit(
+                        file.dataFileId(),
                         file.dataFilePath(),
                         file.deleteFilePath(),
                         file.rowIdStart(),

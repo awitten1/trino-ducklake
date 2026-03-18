@@ -1,6 +1,5 @@
 package io.trino.plugin.ducklake;
 
-import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.metrics.Metrics;
@@ -20,18 +19,15 @@ public class DuckLakeConstraintFilteringPageSource
 {
     private final ConnectorPageSource delegate;
     private final List<DuckLakeColumnHandle> readColumns;
-    private final int visibleColumnCount;
     private final Map<Integer, Domain> domainsByChannel;
 
     public DuckLakeConstraintFilteringPageSource(
             ConnectorPageSource delegate,
             List<DuckLakeColumnHandle> readColumns,
-            int visibleColumnCount,
             Map<Integer, Domain> domainsByChannel)
     {
         this.delegate = requireNonNull(delegate, "delegate is null");
         this.readColumns = List.copyOf(requireNonNull(readColumns, "readColumns is null"));
-        this.visibleColumnCount = visibleColumnCount;
         this.domainsByChannel = Map.copyOf(requireNonNull(domainsByChannel, "domainsByChannel is null"));
     }
 
@@ -83,12 +79,17 @@ public class DuckLakeConstraintFilteringPageSource
             if (retainedCount < page.getPositionCount()) {
                 page.selectPositions(retained, 0, retainedCount);
             }
-
-            if (page.getChannelCount() == visibleColumnCount) {
-                return page;
-            }
-            return create(projectVisibleColumns(page));
+            return create(page.getColumns(allChannels(page.getChannelCount())));
         }
+    }
+
+    private static int[] allChannels(int channelCount)
+    {
+        int[] channels = new int[channelCount];
+        for (int index = 0; index < channelCount; index++) {
+            channels[index] = index;
+        }
+        return channels;
     }
 
     private boolean matches(SourcePage page, int position)
@@ -102,15 +103,6 @@ public class DuckLakeConstraintFilteringPageSource
             }
         }
         return true;
-    }
-
-    private Page projectVisibleColumns(SourcePage page)
-    {
-        int[] visibleChannels = new int[visibleColumnCount];
-        for (int channel = 0; channel < visibleColumnCount; channel++) {
-            visibleChannels[channel] = channel;
-        }
-        return page.getColumns(visibleChannels);
     }
 
     @Override

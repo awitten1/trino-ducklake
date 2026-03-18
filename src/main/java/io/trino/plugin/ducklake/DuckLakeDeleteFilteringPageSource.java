@@ -1,7 +1,6 @@
 package io.trino.plugin.ducklake;
 
 import io.trino.spi.Page;
-import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
@@ -11,7 +10,6 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.io.IOException;
 import java.util.OptionalLong;
 
-import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.connector.SourcePage.create;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
@@ -22,18 +20,15 @@ public class DuckLakeDeleteFilteringPageSource
     private final ConnectorPageSource delegate;
     private final LongOpenHashSet deletedRowIds;
     private final long rowIdStart;
-    private final int visibleColumnCount;
 
     public DuckLakeDeleteFilteringPageSource(
             ConnectorPageSource delegate,
             LongOpenHashSet deletedRowIds,
-            long rowIdStart,
-            int visibleColumnCount)
+            long rowIdStart)
     {
         this.delegate = requireNonNull(delegate, "delegate is null");
         this.deletedRowIds = requireNonNull(deletedRowIds, "deletedRowIds is null");
         this.rowIdStart = rowIdStart;
-        this.visibleColumnCount = visibleColumnCount;
     }
 
     @Override
@@ -70,10 +65,6 @@ public class DuckLakeDeleteFilteringPageSource
             }
 
             int rowNumberChannel = page.getChannelCount() - 1;
-            if (rowNumberChannel < visibleColumnCount) {
-                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Delete filtering requires a hidden row-number channel");
-            }
-
             Block rowNumbers = page.getBlock(rowNumberChannel);
             int[] retained = new int[page.getPositionCount()];
             int retainedCount = 0;
@@ -91,14 +82,17 @@ public class DuckLakeDeleteFilteringPageSource
             if (retainedCount < page.getPositionCount()) {
                 page.selectPositions(retained, 0, retainedCount);
             }
-
-            int[] visibleChannels = new int[visibleColumnCount];
-            for (int channel = 0; channel < visibleColumnCount; channel++) {
-                visibleChannels[channel] = channel;
-            }
-            Page visiblePage = page.getColumns(visibleChannels);
-            return create(visiblePage);
+            return create(page.getColumns(allChannels(page.getChannelCount())));
         }
+    }
+
+    private static int[] allChannels(int channelCount)
+    {
+        int[] channels = new int[channelCount];
+        for (int index = 0; index < channelCount; index++) {
+            channels[index] = index;
+        }
+        return channels;
     }
 
     @Override

@@ -9,6 +9,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
@@ -19,6 +20,7 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
@@ -42,6 +44,7 @@ public class DuckLakeMetadata
         implements ConnectorMetadata
 {
     private static final JsonCodec<DuckLakeWrittenFileInfo> FILE_INFO_CODEC = JsonCodec.jsonCodec(DuckLakeWrittenFileInfo.class);
+    private static final JsonCodec<DuckLakeMergeFragment> MERGE_FRAGMENT_CODEC = JsonCodec.jsonCodec(DuckLakeMergeFragment.class);
 
     private final DuckLakeClient duckLakeClient;
 
@@ -136,6 +139,9 @@ public class DuckLakeMetadata
     @Override
     public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
     {
+        if (columnHandle instanceof DuckLakeMergeRowIdHandle) {
+            return new ColumnMetadata("$ducklake_merge_row_id", DuckLakeMergeRowIdHandle.TYPE);
+        }
         return ((DuckLakeColumnHandle) columnHandle).getColumnMetadata();
     }
 
@@ -239,6 +245,62 @@ public class DuckLakeMetadata
         return Optional.empty();
     }
 
+    @Override
+    public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
+    }
+
+    @Override
+    public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return new DuckLakeMergeRowIdHandle("ducklake-merge-row-id");
+    }
+
+    @Override
+    public ConnectorMergeTableHandle beginMerge(
+            ConnectorSession session,
+            ConnectorTableHandle tableHandle,
+            Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
+            RetryMode retryMode)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeClient.InsertContext ctx = duckLakeClient.getInsertContext(handle);
+        List<DuckLakeMergeFileHandle> activeFiles = duckLakeClient.getDataFiles(handle, io.trino.spi.predicate.TupleDomain.all()).stream()
+                .map(file -> new DuckLakeMergeFileHandle(
+                        file.dataFileId(),
+                        file.dataFilePath(),
+                        file.deleteFilePath(),
+                        file.rowIdStart()))
+                .toList();
+        return new DuckLakeMergeTableHandle(
+                handle,
+                ctx.columns(),
+                ctx.dataPath(),
+                ctx.schemaPath(),
+                ctx.tablePath(),
+                activeFiles);
+    }
+
+    @Override
+    public void finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeTableHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DuckLakeMergeTableHandle handle = (DuckLakeMergeTableHandle) mergeTableHandle;
+        List<DuckLakeWrittenFileInfo> insertedFiles = new ArrayList<>();
+        List<DuckLakeDeleteFileInfo> deleteFiles = new ArrayList<>();
+        for (Slice fragment : fragments) {
+            DuckLakeMergeFragment mergeFragment = MERGE_FRAGMENT_CODEC.fromJson(fragment.getBytes());
+            insertedFiles.addAll(mergeFragment.insertedFiles());
+            deleteFiles.addAll(mergeFragment.deleteFiles());
+        }
+        duckLakeClient.finishMerge(handle.getDuckLakeTableHandle(), insertedFiles, deleteFiles);
+    }
+
     // -------------------------------------------------------------------------
     // CREATE TABLE AS SELECT (CTAS)
     // -------------------------------------------------------------------------
@@ -255,21 +317,31 @@ public class DuckLakeMetadata
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
         }
         SchemaTableName tableName = tableMetadata.getTable();
+        if (duckLakeClient.getTableInfoWithSnapshot(tableName.getSchemaName(), tableName.getTableName()).isPresent()) {
+            throw new TrinoException(ALREADY_EXISTS, "Table already exists: " + tableName);
+        }
         String dataPath = duckLakeClient.getDataPath();
-        DuckLakeClient.CreateTableResult result = duckLakeClient.createTableReturningInfo(
-                tableName.getSchemaName(),
-                tableName.getTableName(),
-                tableMetadata.getColumns());
+        String schemaPath = duckLakeClient.getSchemaPath(tableName.getSchemaName());
+        List<DuckLakeColumnHandle> temporaryColumns = new ArrayList<>();
+        List<ColumnMetadata> columns = tableMetadata.getColumns();
+        for (int i = 0; i < columns.size(); i++) {
+            ColumnMetadata column = columns.get(i);
+            temporaryColumns.add(new DuckLakeColumnHandle(
+                    column.getName(),
+                    column.getType(),
+                    i,
+                    i));
+        }
 
         return new DuckLakeOutputTableHandle(
                 tableName.getSchemaName(),
                 tableName.getTableName(),
-                result.columnHandles(),
-                result.tableId(),
+                temporaryColumns,
+                0,
                 0, // snapshotId not needed for CTAS handle
                 dataPath,
-                result.schemaPath(),
-                result.tablePath());
+                schemaPath,
+                tableName.getTableName());
     }
 
     @Override
@@ -281,10 +353,43 @@ public class DuckLakeMetadata
     {
         DuckLakeOutputTableHandle handle = (DuckLakeOutputTableHandle) tableHandle;
         List<DuckLakeWrittenFileInfo> files = parseFragments(fragments);
-        if (!files.isEmpty()) {
-            duckLakeClient.finishInsert(handle.getTableId(), files);
-        }
+        DuckLakeClient.CreateTableResult result = duckLakeClient.createTableReturningInfo(
+                handle.getSchemaName(),
+                handle.getTableName(),
+                handle.getColumns().stream()
+                        .map(DuckLakeColumnHandle::getColumnMetadata)
+                        .toList());
+        duckLakeClient.finishInsert(result.tableId(), remapCtasFiles(files, result.columnHandles()));
         return Optional.empty();
+    }
+
+    private List<DuckLakeWrittenFileInfo> remapCtasFiles(List<DuckLakeWrittenFileInfo> files, List<DuckLakeColumnHandle> actualColumns)
+    {
+        if (files.isEmpty()) {
+            return files;
+        }
+
+        List<DuckLakeWrittenFileInfo> remappedFiles = new ArrayList<>(files.size());
+        for (DuckLakeWrittenFileInfo file : files) {
+            List<DuckLakeWrittenFileInfo.ColumnStats> remappedStats = new ArrayList<>(file.columnStats().size());
+            for (DuckLakeWrittenFileInfo.ColumnStats columnStats : file.columnStats()) {
+                int temporaryColumnId = Math.toIntExact(columnStats.columnId());
+                DuckLakeColumnHandle actualColumn = actualColumns.get(temporaryColumnId);
+                remappedStats.add(new DuckLakeWrittenFileInfo.ColumnStats(
+                        actualColumn.getColumnId(),
+                        columnStats.valueCount(),
+                        columnStats.nullCount(),
+                        columnStats.minValue(),
+                        columnStats.maxValue()));
+            }
+            remappedFiles.add(new DuckLakeWrittenFileInfo(
+                    file.path(),
+                    file.recordCount(),
+                    file.fileSizeBytes(),
+                    file.footerSize(),
+                    remappedStats));
+        }
+        return remappedFiles;
     }
 
     private List<DuckLakeWrittenFileInfo> parseFragments(Collection<Slice> fragments)

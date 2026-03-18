@@ -14,6 +14,7 @@ import static java.util.Objects.requireNonNull;
 public final class DuckLakeSplit
         implements ConnectorSplit
 {
+    private final long dataFileId;
     private final String dataFilePath;
     private final Optional<String> deleteFilePath;
     private final long rowIdStart;
@@ -21,15 +22,23 @@ public final class DuckLakeSplit
 
     @JsonCreator
     public DuckLakeSplit(
+            @JsonProperty("dataFileId") long dataFileId,
             @JsonProperty("dataFilePath") String dataFilePath,
             @JsonProperty("deleteFilePath") Optional<String> deleteFilePath,
             @JsonProperty("rowIdStart") long rowIdStart,
             @JsonProperty("recordCount") long recordCount)
     {
+        this.dataFileId = dataFileId;
         this.dataFilePath = requireNonNull(dataFilePath, "dataFilePath is null");
         this.deleteFilePath = requireNonNull(deleteFilePath, "deleteFilePath is null");
         this.rowIdStart = rowIdStart;
         this.recordCount = recordCount;
+    }
+
+    @JsonProperty
+    public long getDataFileId()
+    {
+        return dataFileId;
     }
 
     @JsonProperty

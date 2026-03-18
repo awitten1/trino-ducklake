@@ -3,6 +3,8 @@ package io.trino.plugin.ducklake;
 import com.google.inject.Inject;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
@@ -16,11 +18,13 @@ public class DuckLakePageSinkProvider
         implements ConnectorPageSinkProvider
 {
     private final TrinoFileSystemFactory fileSystemFactory;
+    private final DuckLakeConnectionManager connectionManager;
 
     @Inject
-    public DuckLakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory)
+    public DuckLakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, DuckLakeConnectionManager connectionManager)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.connectionManager = requireNonNull(connectionManager, "connectionManager is null");
     }
 
     @Override
@@ -53,5 +57,20 @@ public class DuckLakePageSinkProvider
                 handle.getSchemaPath(),
                 handle.getTablePath(),
                 handle.getColumns());
+    }
+
+    @Override
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeTableHandle,
+            ConnectorPageSinkId pageSinkId)
+    {
+        DuckLakeMergeTableHandle handle = (DuckLakeMergeTableHandle) mergeTableHandle;
+        return new DuckLakeMergeSink(
+                fileSystemFactory,
+                session,
+                connectionManager,
+                handle);
     }
 }
