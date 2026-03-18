@@ -353,43 +353,14 @@ public class DuckLakeMetadata
     {
         DuckLakeOutputTableHandle handle = (DuckLakeOutputTableHandle) tableHandle;
         List<DuckLakeWrittenFileInfo> files = parseFragments(fragments);
-        DuckLakeClient.CreateTableResult result = duckLakeClient.createTableReturningInfo(
+        duckLakeClient.createTableAndInsert(
                 handle.getSchemaName(),
                 handle.getTableName(),
                 handle.getColumns().stream()
                         .map(DuckLakeColumnHandle::getColumnMetadata)
-                        .toList());
-        duckLakeClient.finishInsert(result.tableId(), remapCtasFiles(files, result.columnHandles()));
+                        .toList(),
+                files);
         return Optional.empty();
-    }
-
-    private List<DuckLakeWrittenFileInfo> remapCtasFiles(List<DuckLakeWrittenFileInfo> files, List<DuckLakeColumnHandle> actualColumns)
-    {
-        if (files.isEmpty()) {
-            return files;
-        }
-
-        List<DuckLakeWrittenFileInfo> remappedFiles = new ArrayList<>(files.size());
-        for (DuckLakeWrittenFileInfo file : files) {
-            List<DuckLakeWrittenFileInfo.ColumnStats> remappedStats = new ArrayList<>(file.columnStats().size());
-            for (DuckLakeWrittenFileInfo.ColumnStats columnStats : file.columnStats()) {
-                int temporaryColumnId = Math.toIntExact(columnStats.columnId());
-                DuckLakeColumnHandle actualColumn = actualColumns.get(temporaryColumnId);
-                remappedStats.add(new DuckLakeWrittenFileInfo.ColumnStats(
-                        actualColumn.getColumnId(),
-                        columnStats.valueCount(),
-                        columnStats.nullCount(),
-                        columnStats.minValue(),
-                        columnStats.maxValue()));
-            }
-            remappedFiles.add(new DuckLakeWrittenFileInfo(
-                    file.path(),
-                    file.recordCount(),
-                    file.fileSizeBytes(),
-                    file.footerSize(),
-                    remappedStats));
-        }
-        return remappedFiles;
     }
 
     private List<DuckLakeWrittenFileInfo> parseFragments(Collection<Slice> fragments)

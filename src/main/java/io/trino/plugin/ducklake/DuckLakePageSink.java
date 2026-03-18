@@ -134,6 +134,8 @@ public class DuckLakePageSink
     @Override
     public void abort()
     {
+        // Close and clean up the in-progress file (not yet in writtenFiles)
+        String inProgressFilePath = currentFilePath;
         try {
             if (currentWriter != null) {
                 currentWriter.close();
@@ -142,8 +144,15 @@ public class DuckLakePageSink
         }
         catch (IOException ignored) {
         }
+        if (inProgressFilePath != null) {
+            try {
+                fileSystem.deleteFile(toLocation(inProgressFilePath));
+            }
+            catch (IOException ignored) {
+            }
+        }
 
-        // Best-effort cleanup of written files
+        // Best-effort cleanup of completed files
         for (DuckLakeWrittenFileInfo fileInfo : writtenFiles) {
             try {
                 fileSystem.deleteFile(toLocation(resolveFullPath(fileInfo.path())));
@@ -325,7 +334,7 @@ public class DuckLakePageSink
 
     private String resolveFullPath(String relativePath)
     {
-        return dataPath + relativePath;
+        return buildTableDirectoryPath() + relativePath;
     }
 
     private static Location toLocation(String path)

@@ -21,5 +21,8 @@ public record DuckLakeWrittenFileInfo(
             @JsonProperty("nullCount") long nullCount,
             @JsonProperty("minValue") String minValue,
             @JsonProperty("maxValue") String maxValue)
-    {}
+    {
+        @JsonCreator
+        public ColumnStats {}
+    }
 }

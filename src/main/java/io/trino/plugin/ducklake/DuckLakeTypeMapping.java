@@ -28,49 +28,49 @@ public class DuckLakeTypeMapping
 
     public static String toDuckLakeType(Type trinoType)
     {
-        if (trinoType instanceof io.trino.spi.type.BooleanType) {
-            return "BOOLEAN";
+        if (trinoType instanceof BooleanType) {
+            return "boolean";
         }
         if (trinoType instanceof TinyintType) {
-            return "TINYINT";
+            return "int8";
         }
         if (trinoType instanceof SmallintType) {
-            return "SMALLINT";
+            return "int16";
         }
         if (trinoType instanceof IntegerType) {
-            return "INT";
+            return "int32";
         }
         if (trinoType instanceof BigintType) {
-            return "BIGINT";
+            return "int64";
         }
         if (trinoType instanceof RealType) {
-            return "FLOAT";
+            return "float32";
         }
         if (trinoType instanceof DoubleType) {
-            return "DOUBLE";
+            return "float64";
         }
         if (trinoType instanceof DecimalType decimalType) {
-            return "DECIMAL(" + decimalType.getPrecision() + ", " + decimalType.getScale() + ")";
+            return "decimal(" + decimalType.getPrecision() + ", " + decimalType.getScale() + ")";
         }
         if (trinoType instanceof VarcharType) {
-            return "VARCHAR";
+            return "varchar";
         }
         if (trinoType instanceof VarbinaryType) {
-            return "BLOB";
+            return "blob";
         }
         if (trinoType instanceof DateType) {
-            return "DATE";
+            return "date";
         }
         if (trinoType instanceof TimestampWithTimeZoneType) {
-            return "TIMESTAMPTZ";
+            return "timestamptz";
         }
         if (trinoType instanceof TimestampType) {
-            return "TIMESTAMP";
+            return "timestamp";
         }
         if (trinoType instanceof UuidType) {
-            return "UUID";
+            return "uuid";
         }
-        return "VARCHAR";
+        return "varchar";
     }
 
     public static Type toTrinoType(String duckLakeType)
@@ -91,23 +91,22 @@ public class DuckLakeTypeMapping
         return switch (upper) {
             case "BOOLEAN", "BOOL", "LOGICAL" -> BooleanType.BOOLEAN;
 
-            // Integers — both DuckDB byte-count aliases (INT1/INT2/INT4/INT8)
-            // and bit-width names (INT8/INT16/INT32/INT64) used by DuckLake
-            case "TINYINT", "INT1" -> TinyintType.TINYINT;
-            case "SMALLINT", "INT2", "SHORT" -> SmallintType.SMALLINT;
-            case "INTEGER", "INT", "INT4", "INT32", "SIGNED" -> IntegerType.INTEGER;
-            case "BIGINT", "INT8", "LONG", "INT64" -> BigintType.BIGINT;
-            case "HUGEINT", "INT128" -> DecimalType.createDecimalType(38, 0);
+            // DuckLake canonical names use bit-width (INT8=8-bit, INT16=16-bit, etc.)
+            case "INT8", "TINYINT", "INT1" -> TinyintType.TINYINT;
+            case "INT16", "SMALLINT", "INT2", "SHORT" -> SmallintType.SMALLINT;
+            case "INT32", "INTEGER", "INT", "INT4", "SIGNED" -> IntegerType.INTEGER;
+            case "INT64", "BIGINT", "LONG" -> BigintType.BIGINT;
+            case "INT128", "HUGEINT" -> DecimalType.createDecimalType(38, 0);
 
             // Unsigned integers — map to next larger signed type
-            case "UTINYINT", "UINT8" -> SmallintType.SMALLINT;
-            case "USMALLINT", "UINT16" -> IntegerType.INTEGER;
-            case "UINTEGER", "UINT32" -> BigintType.BIGINT;
-            case "UBIGINT", "UINT64" -> DecimalType.createDecimalType(20, 0);
+            case "UINT8", "UTINYINT" -> SmallintType.SMALLINT;
+            case "UINT16", "USMALLINT" -> IntegerType.INTEGER;
+            case "UINT32", "UINTEGER" -> BigintType.BIGINT;
+            case "UINT64", "UBIGINT" -> DecimalType.createDecimalType(20, 0);
 
             // Floating point
-            case "FLOAT", "FLOAT4", "REAL", "FLOAT32" -> RealType.REAL;
-            case "DOUBLE", "FLOAT8", "FLOAT64" -> DoubleType.DOUBLE;
+            case "FLOAT32", "FLOAT", "FLOAT4", "REAL" -> RealType.REAL;
+            case "FLOAT64", "DOUBLE", "FLOAT8" -> DoubleType.DOUBLE;
 
             // Strings
             case "VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR" -> VarcharType.VARCHAR;

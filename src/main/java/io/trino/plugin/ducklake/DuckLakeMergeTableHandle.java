@@ -37,13 +37,12 @@ public final class DuckLakeMergeTableHandle
     }
 
     @Override
-    @JsonProperty
     public ConnectorTableHandle getTableHandle()
     {
         return tableHandle;
     }
 
-    @JsonProperty
+    @JsonProperty("tableHandle")
     public DuckLakeTableHandle getDuckLakeTableHandle()
     {
         return tableHandle;
