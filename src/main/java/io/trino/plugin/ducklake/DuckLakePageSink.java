@@ -165,7 +165,7 @@ public class DuckLakePageSink
     private void openNewFile()
             throws IOException
     {
-        String fileName = UUID.randomUUID() + ".parquet";
+        String fileName = "ducklake-" + UUID.randomUUID() + ".parquet";
         String tableDirectoryPath = buildTableDirectoryPath();
         String fullPath = tableDirectoryPath + fileName;
 

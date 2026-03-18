@@ -120,7 +120,6 @@ public class DuckLakePageSourceProvider
                         deleteFileReader.readDeletedRowIds(
                                 session,
                                 duckLakeSplit.getDeleteFilePath().orElseThrow(),
-                                duckLakeSplit.getDataFilePath(),
                                 duckLakeSplit.getRowIdStart()),
                         duckLakeSplit.getRowIdStart());
             }

@@ -42,7 +42,6 @@ import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 
 public class DuckLakeDeleteFileReader
 {
@@ -51,7 +50,6 @@ public class DuckLakeDeleteFileReader
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final ParquetReaderOptions parquetReaderOptions;
-    private final Optional<String> metadataBaseDirectory;
 
     public DuckLakeDeleteFileReader(
             TrinoFileSystemFactory fileSystemFactory,
@@ -60,33 +58,29 @@ public class DuckLakeDeleteFileReader
     {
         this.fileSystemFactory = fileSystemFactory;
         this.parquetReaderOptions = parquetReaderOptions;
-        this.metadataBaseDirectory = Optional.ofNullable(metadataBaseDirectory);
     }
 
     public LongOpenHashSet readDeletedRowIds(
             ConnectorSession session,
             String deleteFilePath,
-            String dataFilePath,
             long rowIdStart)
             throws IOException
     {
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         Location location = toLocation(deleteFilePath);
         TrinoInputFile inputFile = fileSystem.newInputFile(location);
-        String normalizedDataFileLocation = normalizeDataFileLocation(dataFilePath);
         ParquetDataSource dataSource = new DuckLakeParquetDataSource(inputFile, parquetReaderOptions);
         AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
         try {
             ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
             FileMetadata fileMetadata = parquetMetadata.getFileMetaData();
             MessageType fileSchema = fileMetadata.getSchema();
-            org.apache.parquet.schema.Type filePathType = getParquetTypeByName("file_path", fileSchema);
             org.apache.parquet.schema.Type posType = getParquetTypeByName("pos", fileSchema);
-            if (filePathType == null || posType == null) {
-                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Delete file is missing expected file_path/pos columns: " + deleteFilePath);
+            if (posType == null) {
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Delete file is missing expected pos column: " + deleteFilePath);
             }
 
-            MessageType requestedSchema = new MessageType(fileSchema.getName(), filePathType, posType);
+            MessageType requestedSchema = new MessageType(fileSchema.getName(), posType);
             MessageColumnIO messageColumn = getColumnIO(fileSchema, requestedSchema);
             Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, requestedSchema);
             TupleDomainParquetPredicate parquetPredicate = buildPredicate(requestedSchema, io.trino.spi.predicate.TupleDomain.all(), descriptorsByPath, UTC);
@@ -102,17 +96,12 @@ public class DuckLakeDeleteFileReader
                     DOMAIN_COMPACTION_THRESHOLD,
                     parquetReaderOptions);
 
-            ColumnIO filePathColumnIo = lookupColumnByName(messageColumn, "file_path");
             ColumnIO posColumnIo = lookupColumnByName(messageColumn, "pos");
-            Field filePathField = constructField(VARCHAR, filePathColumnIo)
-                    .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported file_path column in delete file: " + deleteFilePath));
             Field posField = constructField(BIGINT, posColumnIo)
                     .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported pos column in delete file: " + deleteFilePath));
             ParquetReader reader = new ParquetReader(
                     Optional.ofNullable(fileMetadata.getCreatedBy()),
-                    List.of(
-                            new Column("file_path", filePathField),
-                            new Column("pos", posField)),
+                    List.of(new Column("pos", posField)),
                     false,
                     rowGroups,
                     dataSource,
@@ -131,13 +120,9 @@ public class DuckLakeDeleteFileReader
                     if (page == null) {
                         break;
                     }
-                    Block filePathBlock = page.getBlock(0);
-                    Block posBlock = page.getBlock(1);
+                    Block posBlock = page.getBlock(0);
                     for (int position = 0; position < page.getPositionCount(); position++) {
-                        String deleteFileTarget = VARCHAR.getSlice(filePathBlock, position).toStringUtf8();
-                        if (normalizeDeleteTargetLocation(deleteFileTarget).equals(normalizedDataFileLocation)) {
-                            deletedRows.add(rowIdStart + BIGINT.getLong(posBlock, position));
-                        }
+                        deletedRows.add(rowIdStart + BIGINT.getLong(posBlock, position));
                     }
                 }
                 return deletedRows;
@@ -159,26 +144,5 @@ public class DuckLakeDeleteFileReader
             return Location.of(Path.of(path).toUri().toString());
         }
         return Location.of(path);
-    }
-
-    private String normalizeDataFileLocation(String dataFilePath)
-    {
-        return normalizeLocation(toLocation(dataFilePath));
-    }
-
-    private String normalizeDeleteTargetLocation(String deleteFileTarget)
-    {
-        if (deleteFileTarget.startsWith("/") || deleteFileTarget.contains(":")) {
-            return normalizeLocation(toLocation(deleteFileTarget));
-        }
-        if (metadataBaseDirectory.isPresent()) {
-            return normalizeLocation(toLocation(Path.of(metadataBaseDirectory.orElseThrow(), deleteFileTarget).toString()));
-        }
-        return deleteFileTarget;
-    }
-
-    private static String normalizeLocation(Location location)
-    {
-        return location.toString();
     }
 }

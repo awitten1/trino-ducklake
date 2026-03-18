@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -48,6 +49,8 @@ import static java.util.Objects.requireNonNull;
 
 public class DuckLakeClient
 {
+    private static final Pattern SIMPLE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_]+");
+
     private final DuckLakeConnectionManager connectionManager;
 
     @Inject
@@ -667,16 +670,17 @@ public class DuckLakeClient
                     }
                 }
 
-                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_SCHEMA", 1, 0, true);
+                SnapshotInfo snapshot = createSnapshot(conn, "created_schema:" + schemaName, 1, 0, true);
                 long schemaId = snapshot.nextCatalogId();
+                UUID schemaUuid = UUID.randomUUID();
 
                 try (PreparedStatement stmt = conn.prepareStatement(
                         "INSERT INTO ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative) VALUES (?, ?, ?, NULL, ?, ?, true)")) {
                     stmt.setLong(1, schemaId);
-                    setUuid(stmt, 2, UUID.randomUUID());
+                    setUuid(stmt, 2, schemaUuid);
                     stmt.setLong(3, snapshot.snapshotId());
                     stmt.setString(4, schemaName);
-                    stmt.setString(5, schemaName + "/");
+                    stmt.setString(5, defaultSchemaPath(schemaName, schemaUuid));
                     stmt.executeUpdate();
                 }
 
@@ -729,7 +733,7 @@ public class DuckLakeClient
                     }
                 }
 
-                SnapshotInfo snapshot = createSnapshot(conn, "DROP_SCHEMA", 0, 0, true);
+                SnapshotInfo snapshot = createSnapshot(conn, "dropped_schema:" + schemaId, 0, 0, true);
 
                 try (PreparedStatement stmt = conn.prepareStatement(
                         "UPDATE ducklake_schema SET end_snapshot = ? WHERE schema_id = ? AND end_snapshot IS NULL")) {
@@ -792,7 +796,7 @@ public class DuckLakeClient
 
                 // Need 1 ID for table + 1 per column
                 long catalogIdIncrement = 1 + columns.size();
-                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_TABLE", catalogIdIncrement, 0, true);
+                SnapshotInfo snapshot = createSnapshot(conn, "created_table:" + tableName, catalogIdIncrement, 0, true);
                 long tableId = snapshot.nextCatalogId();
 
                 createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, snapshot.nextCatalogId() + 1);
@@ -839,7 +843,7 @@ public class DuckLakeClient
                 }
 
                 long catalogIdIncrement = 1 + columns.size();
-                SnapshotInfo snapshot = createSnapshot(conn, "CREATE_TABLE", catalogIdIncrement, files.size(), true);
+                SnapshotInfo snapshot = createSnapshot(conn, "created_table:" + tableName, catalogIdIncrement, files.size(), true);
                 long tableId = snapshot.nextCatalogId();
                 long firstColumnId = snapshot.nextCatalogId() + 1;
 
@@ -860,6 +864,7 @@ public class DuckLakeClient
                     // Remap temporary ordinal column IDs to actual database column IDs
                     List<DuckLakeWrittenFileInfo> remappedFiles = remapColumnIds(files, firstColumnId);
                     registerInsertedFiles(conn, tableId, snapshot, remappedFiles);
+                    appendSnapshotChange(conn, snapshot.snapshotId(), "inserted_into_table:" + tableId);
                 }
 
                 conn.commit();
@@ -878,12 +883,12 @@ public class DuckLakeClient
     private String createTableInternal(Connection conn, long tableId, long schemaId, long snapshotId, String tableName, List<ColumnMetadata> columns, long firstColumnId)
             throws SQLException
     {
-        // Insert table — path must have trailing slash for correct concatenation with file paths
-        String tablePath = tableName + "/";
+        UUID tableUuid = UUID.randomUUID();
+        String tablePath = defaultTablePath(tableName, tableUuid);
         try (PreparedStatement stmt = conn.prepareStatement(
                 "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
             stmt.setLong(1, tableId);
-            setUuid(stmt, 2, UUID.randomUUID());
+            setUuid(stmt, 2, tableUuid);
             stmt.setLong(3, snapshotId);
             stmt.setLong(4, schemaId);
             stmt.setString(5, tableName);
@@ -1011,7 +1016,7 @@ public class DuckLakeClient
         try (Connection conn = connectionManager.openMetadataConnection()) {
             conn.setAutoCommit(false);
             try {
-                SnapshotInfo snapshot = createSnapshot(conn, "INSERT", 0, files.size(), false);
+                SnapshotInfo snapshot = createSnapshot(conn, "inserted_into_table:" + tableId, 0, files.size(), false);
                 registerInsertedFiles(conn, tableId, snapshot, files);
 
                 conn.commit();
@@ -1035,7 +1040,11 @@ public class DuckLakeClient
         try (Connection conn = connectionManager.openMetadataConnection()) {
             conn.setAutoCommit(false);
             try {
-                String changeType = insertedFiles.isEmpty() ? "DELETE" : (deleteFiles.isEmpty() ? "INSERT" : "UPDATE");
+                String changeType = insertedFiles.isEmpty()
+                        ? "deleted_from_table:" + tableHandle.getTableId()
+                        : deleteFiles.isEmpty()
+                                ? "inserted_into_table:" + tableHandle.getTableId()
+                                : "deleted_from_table:" + tableHandle.getTableId() + ",inserted_into_table:" + tableHandle.getTableId();
                 SnapshotInfo snapshot = createSnapshot(conn, changeType, 0, insertedFiles.size() + deleteFiles.size(), false);
                 long nextFileId = snapshot.nextFileId();
 
@@ -1093,7 +1102,7 @@ public class DuckLakeClient
 
         for (DuckLakeWrittenFileInfo file : files) {
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id, partial_max) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, ?, NULL, NULL, NULL, NULL)")) {
+                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id, partial_file_info) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, ?, NULL, NULL, NULL, NULL)")) {
                 stmt.setLong(1, fileId);
                 stmt.setLong(2, tableId);
                 stmt.setLong(3, snapshot.snapshotId());
@@ -1157,7 +1166,7 @@ public class DuckLakeClient
         long deleteFileId = firstDeleteFileId;
         for (DuckLakeDeleteFileInfo deleteFile : deleteFiles) {
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO ducklake_delete_file (delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id, path, path_is_relative, format, delete_count, file_size_bytes, footer_size, encryption_key, partial_max) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, NULL, NULL)")) {
+                    "INSERT INTO ducklake_delete_file (delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id, path, path_is_relative, format, delete_count, file_size_bytes, footer_size, encryption_key) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, NULL)")) {
                 stmt.setLong(1, deleteFileId);
                 stmt.setLong(2, tableId);
                 stmt.setLong(3, snapshot.snapshotId());
@@ -1314,5 +1323,34 @@ public class DuckLakeClient
             return;
         }
         stmt.setString(parameterIndex, value.toString());
+    }
+
+    private static String defaultSchemaPath(String schemaName, UUID schemaUuid)
+    {
+        return defaultEntityPath(schemaName, schemaUuid);
+    }
+
+    private static String defaultTablePath(String tableName, UUID tableUuid)
+    {
+        return defaultEntityPath(tableName, tableUuid);
+    }
+
+    private static String defaultEntityPath(String name, UUID uuid)
+    {
+        if (SIMPLE_NAME_PATTERN.matcher(name).matches()) {
+            return name + "/";
+        }
+        return uuid + "/";
+    }
+
+    private void appendSnapshotChange(Connection conn, long snapshotId, String change)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "UPDATE ducklake_snapshot_changes SET changes_made = changes_made || ',' || ? WHERE snapshot_id = ?")) {
+            stmt.setString(1, change);
+            stmt.setLong(2, snapshotId);
+            stmt.executeUpdate();
+        }
     }
 }

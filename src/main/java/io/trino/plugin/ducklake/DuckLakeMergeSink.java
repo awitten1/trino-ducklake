@@ -167,32 +167,28 @@ public class DuckLakeMergeSink
 
             if (activeFile.deleteFilePath().isPresent()) {
                 long rowIdStart = activeFile.rowIdStart();
-                deleteFileReader.readDeletedRowIds(session, activeFile.deleteFilePath().orElseThrow(), activeFile.dataFilePath(), rowIdStart)
+                deleteFileReader.readDeletedRowIds(session, activeFile.deleteFilePath().orElseThrow(), rowIdStart)
                         .forEach((long logicalRowId) -> deleteRows.positions.add(logicalRowId - rowIdStart));
             }
 
             List<Long> sortedPositions = new ArrayList<>(deleteRows.positions);
             sortedPositions.sort(Long::compareTo);
-            deleteFiles.add(writeDeleteFile(dataFileId, deleteRows.dataFilePath, sortedPositions));
+            deleteFiles.add(writeDeleteFile(dataFileId, sortedPositions));
         }
         return deleteFiles;
     }
 
-    private DuckLakeDeleteFileInfo writeDeleteFile(long dataFileId, String dataFilePath, List<Long> positions)
+    private DuckLakeDeleteFileInfo writeDeleteFile(long dataFileId, List<Long> positions)
             throws IOException
     {
-        String fileName = UUID.randomUUID() + "-delete.parquet";
+        String fileName = "ducklake-" + UUID.randomUUID() + "-deletes.parquet";
         String tableDirectoryPath = buildTableDirectoryPath();
         String fullPath = tableDirectoryPath + fileName;
         Location location = toLocation(fullPath);
         fileSystem.createDirectory(toLocation(tableDirectoryPath));
 
-        // Convert absolute data file path to relative path (relative to metadata base directory)
-        // for cross-engine compatibility with DuckDB
-        String relativeDataFilePath = toMetadataRelativePath(dataFilePath);
-
-        List<io.trino.spi.type.Type> types = List.of(VARCHAR, BIGINT);
-        List<String> columnNames = List.of("file_path", "pos");
+        List<io.trino.spi.type.Type> types = List.of(BIGINT);
+        List<String> columnNames = List.of("pos");
         ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(types, columnNames, false, false);
         MessageType messageType = schemaConverter.getMessageType();
         Map<List<String>, io.trino.spi.type.Type> primitiveTypes = schemaConverter.getPrimitiveTypes();
@@ -208,40 +204,20 @@ public class DuckLakeMergeSink
                         "trino-ducklake",
                         Optional.empty(),
                         Optional.empty())) {
-            Page page = buildDeletePage(relativeDataFilePath, positions);
+            Page page = buildDeletePage(positions);
             writer.write(page);
             writer.close();
             return new DuckLakeDeleteFileInfo(dataFileId, fileName, positions.size(), writer.getWrittenBytes(), 0);
         }
     }
 
-    private String toMetadataRelativePath(String absolutePath)
+    private static Page buildDeletePage(List<Long> positions)
     {
-        String metadataBaseDir = connectionManager.getMetadataBaseDirectory();
-        if (metadataBaseDir != null && absolutePath.startsWith(metadataBaseDir)) {
-            return absolutePath.substring(metadataBaseDir.length());
-        }
-        // For non-file-based metadata (e.g., PostgreSQL) or S3 paths,
-        // check if the path is a file:// URI and strip the metadata base dir from the URI form
-        if (metadataBaseDir != null) {
-            String metadataBaseUri = java.nio.file.Path.of(metadataBaseDir).toUri().toString();
-            String absoluteUri = toLocation(absolutePath).toString();
-            if (absoluteUri.startsWith(metadataBaseUri)) {
-                return absoluteUri.substring(metadataBaseUri.length());
-            }
-        }
-        return absolutePath;
-    }
-
-    private static Page buildDeletePage(String dataFilePath, List<Long> positions)
-    {
-        BlockBuilder filePathBuilder = VARCHAR.createBlockBuilder(null, positions.size());
         BlockBuilder positionBuilder = BIGINT.createBlockBuilder(null, positions.size());
         for (Long position : positions) {
-            VARCHAR.writeSlice(filePathBuilder, Slices.utf8Slice(dataFilePath));
             BIGINT.writeLong(positionBuilder, position);
         }
-        return new Page(filePathBuilder.build(), positionBuilder.build());
+        return new Page(positionBuilder.build());
     }
 
     private String buildTableDirectoryPath()
