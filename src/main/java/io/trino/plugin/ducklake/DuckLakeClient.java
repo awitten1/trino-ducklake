@@ -798,8 +798,10 @@ public class DuckLakeClient
                 long catalogIdIncrement = 1 + columns.size();
                 SnapshotInfo snapshot = createSnapshot(conn, "created_table:" + tableName, catalogIdIncrement, 0, true);
                 long tableId = snapshot.nextCatalogId();
+                UUID tableUuid = UUID.randomUUID();
+                String tablePath = defaultTablePath(tableName, tableUuid);
 
-                createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, snapshot.nextCatalogId() + 1);
+                createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, snapshot.nextCatalogId() + 1, tableUuid, tablePath);
 
                 conn.commit();
             }
@@ -818,7 +820,86 @@ public class DuckLakeClient
      */
     record CreateTableResult(long tableId, List<DuckLakeColumnHandle> columnHandles, String schemaPath, String tablePath) {}
 
+    record PlannedCreateTable(
+            long tableId,
+            UUID tableUuid,
+            String dataPath,
+            String schemaPath,
+            String tablePath,
+            List<DuckLakeColumnHandle> columns) {}
+
+    PlannedCreateTable planCreateTable(String schemaName, String tableName, List<ColumnMetadata> columns)
+    {
+        try (Connection conn = connectionManager.openMetadataConnection()) {
+            long currentSnapshotId = getCurrentSnapshotId(conn);
+            String dataPath = queryDataPath(conn);
+
+            long schemaId;
+            String schemaPath;
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "SELECT schema_id, path FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                stmt.setString(1, schemaName);
+                stmt.setLong(2, currentSnapshotId);
+                stmt.setLong(3, currentSnapshotId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new TrinoException(SCHEMA_NOT_FOUND, "Schema does not exist: " + schemaName);
+                    }
+                    schemaId = rs.getLong("schema_id");
+                    schemaPath = rs.getString("path");
+                }
+            }
+
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "SELECT table_id FROM ducklake_table WHERE schema_id = ? AND table_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                stmt.setLong(1, schemaId);
+                stmt.setString(2, tableName);
+                stmt.setLong(3, currentSnapshotId);
+                stmt.setLong(4, currentSnapshotId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        throw new TrinoException(ALREADY_EXISTS, "Table already exists: " + schemaName + "." + tableName);
+                    }
+                }
+            }
+
+            long nextCatalogId;
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "SELECT next_catalog_id FROM ducklake_snapshot WHERE snapshot_id = ?")) {
+                stmt.setLong(1, currentSnapshotId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to read next_catalog_id for snapshot " + currentSnapshotId);
+                    }
+                    nextCatalogId = rs.getLong(1);
+                }
+            }
+
+            UUID tableUuid = UUID.randomUUID();
+            String tablePath = defaultTablePath(tableName, tableUuid);
+            List<DuckLakeColumnHandle> columnHandles = new ArrayList<>(columns.size());
+            for (int i = 0; i < columns.size(); i++) {
+                ColumnMetadata column = columns.get(i);
+                columnHandles.add(new DuckLakeColumnHandle(
+                        column.getName(),
+                        column.getType(),
+                        i,
+                        nextCatalogId + 1 + i));
+            }
+
+            return new PlannedCreateTable(nextCatalogId, tableUuid, dataPath, schemaPath, tablePath, columnHandles);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to plan table creation: " + schemaName + "." + tableName, e);
+        }
+    }
+
     CreateTableResult createTableAndInsert(String schemaName, String tableName, List<ColumnMetadata> columns, List<DuckLakeWrittenFileInfo> files)
+    {
+        return createTableAndInsert(schemaName, tableName, columns, files, null);
+    }
+
+    CreateTableResult createTableAndInsert(String schemaName, String tableName, List<ColumnMetadata> columns, List<DuckLakeWrittenFileInfo> files, PlannedCreateTable planned)
     {
         try (Connection conn = connectionManager.openMetadataConnection()) {
             conn.setAutoCommit(false);
@@ -844,10 +925,17 @@ public class DuckLakeClient
 
                 long catalogIdIncrement = 1 + columns.size();
                 SnapshotInfo snapshot = createSnapshot(conn, "created_table:" + tableName, catalogIdIncrement, files.size(), true);
-                long tableId = snapshot.nextCatalogId();
-                long firstColumnId = snapshot.nextCatalogId() + 1;
+                long expectedTableId = snapshot.nextCatalogId();
+                if (planned != null && planned.tableId() != expectedTableId) {
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Concurrent metadata change detected while creating table: " + schemaName + "." + tableName);
+                }
+                long tableId = planned != null ? planned.tableId() : expectedTableId;
+                long firstColumnId = tableId + 1;
 
-                String tablePath = createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, firstColumnId);
+                UUID tableUuid = planned != null ? planned.tableUuid() : UUID.randomUUID();
+                String tablePath = planned != null ? planned.tablePath() : defaultTablePath(tableName, tableUuid);
+
+                createTableInternal(conn, tableId, schemaId, snapshot.snapshotId(), tableName, columns, firstColumnId, tableUuid, tablePath);
 
                 // Build column handles
                 List<DuckLakeColumnHandle> columnHandles = new ArrayList<>();
@@ -861,8 +949,9 @@ public class DuckLakeClient
                 }
 
                 if (!files.isEmpty()) {
-                    // Remap temporary ordinal column IDs to actual database column IDs
-                    List<DuckLakeWrittenFileInfo> remappedFiles = remapColumnIds(files, firstColumnId);
+                    List<DuckLakeWrittenFileInfo> remappedFiles = planned == null
+                            ? remapColumnIds(files, firstColumnId)
+                            : files;
                     registerInsertedFiles(conn, tableId, snapshot, remappedFiles);
                     appendSnapshotChange(conn, snapshot.snapshotId(), "inserted_into_table:" + tableId);
                 }
@@ -880,11 +969,9 @@ public class DuckLakeClient
         }
     }
 
-    private String createTableInternal(Connection conn, long tableId, long schemaId, long snapshotId, String tableName, List<ColumnMetadata> columns, long firstColumnId)
+    private String createTableInternal(Connection conn, long tableId, long schemaId, long snapshotId, String tableName, List<ColumnMetadata> columns, long firstColumnId, UUID tableUuid, String tablePath)
             throws SQLException
     {
-        UUID tableUuid = UUID.randomUUID();
-        String tablePath = defaultTablePath(tableName, tableUuid);
         try (PreparedStatement stmt = conn.prepareStatement(
                 "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
             stmt.setLong(1, tableId);
@@ -898,13 +985,13 @@ public class DuckLakeClient
 
         // Insert columns
         try (PreparedStatement stmt = conn.prepareStatement(
-                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, default_value_type, default_value_dialect) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL)")) {
+                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, default_value_type, default_value_dialect) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, 'NULL', ?, NULL, 'literal', 'duckdb')")) {
             for (int i = 0; i < columns.size(); i++) {
                 ColumnMetadata col = columns.get(i);
                 stmt.setLong(1, firstColumnId + i);
                 stmt.setLong(2, snapshotId);
                 stmt.setLong(3, tableId);
-                stmt.setInt(4, i);
+                stmt.setInt(4, i + 1);
                 stmt.setString(5, col.getName());
                 stmt.setString(6, DuckLakeTypeMapping.toDuckLakeType(col.getType()));
                 stmt.setBoolean(7, true);
@@ -1102,7 +1189,7 @@ public class DuckLakeClient
 
         for (DuckLakeWrittenFileInfo file : files) {
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id, partial_file_info) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, ?, NULL, NULL, NULL, NULL)")) {
+                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id, partial_max) VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, NULL, ?, NULL, NULL, NULL, NULL)")) {
                 stmt.setLong(1, fileId);
                 stmt.setLong(2, tableId);
                 stmt.setLong(3, snapshot.snapshotId());

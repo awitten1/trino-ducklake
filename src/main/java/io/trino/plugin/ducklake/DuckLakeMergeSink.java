@@ -18,7 +18,9 @@ import io.trino.spi.block.RowBlock;
 import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorSession;
 import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Types;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -43,6 +45,8 @@ public class DuckLakeMergeSink
         implements ConnectorMergeSink
 {
     private static final JsonCodec<DuckLakeMergeFragment> MERGE_FRAGMENT_CODEC = JsonCodec.jsonCodec(DuckLakeMergeFragment.class);
+    private static final int DELETE_FILE_NAME_FIELD_ID = Integer.MAX_VALUE - 1;
+    private static final int DELETE_POSITION_FIELD_ID = Integer.MAX_VALUE - 2;
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final TrinoFileSystem fileSystem;
@@ -173,12 +177,12 @@ public class DuckLakeMergeSink
 
             List<Long> sortedPositions = new ArrayList<>(deleteRows.positions);
             sortedPositions.sort(Long::compareTo);
-            deleteFiles.add(writeDeleteFile(dataFileId, sortedPositions));
+            deleteFiles.add(writeDeleteFile(dataFileId, deleteRows.dataFilePath, sortedPositions));
         }
         return deleteFiles;
     }
 
-    private DuckLakeDeleteFileInfo writeDeleteFile(long dataFileId, List<Long> positions)
+    private DuckLakeDeleteFileInfo writeDeleteFile(long dataFileId, String dataFilePath, List<Long> positions)
             throws IOException
     {
         String fileName = "ducklake-" + UUID.randomUUID() + "-deletes.parquet";
@@ -187,11 +191,19 @@ public class DuckLakeMergeSink
         Location location = toLocation(fullPath);
         fileSystem.createDirectory(toLocation(tableDirectoryPath));
 
-        List<io.trino.spi.type.Type> types = List.of(BIGINT);
-        List<String> columnNames = List.of("pos");
-        ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(types, columnNames, false, false);
-        MessageType messageType = schemaConverter.getMessageType();
-        Map<List<String>, io.trino.spi.type.Type> primitiveTypes = schemaConverter.getPrimitiveTypes();
+        MessageType messageType = Types.buildMessage()
+                .addField(Types.optional(org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY)
+                        .as(LogicalTypeAnnotation.stringType())
+                        .id(DELETE_FILE_NAME_FIELD_ID)
+                        .named("file_name"))
+                .addField(Types.optional(org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64)
+                        .as(LogicalTypeAnnotation.intType(64, true))
+                        .id(DELETE_POSITION_FIELD_ID)
+                        .named("position"))
+                .named("duckdb_schema");
+        Map<List<String>, io.trino.spi.type.Type> primitiveTypes = Map.of(
+                List.of("file_name"), VARCHAR,
+                List.of("position"), BIGINT);
         ParquetWriterOptions writerOptions = ParquetWriterOptions.builder().build();
 
         try (OutputStream outputStream = fileSystem.newOutputFile(location).create();
@@ -204,20 +216,22 @@ public class DuckLakeMergeSink
                         "trino-ducklake",
                         Optional.empty(),
                         Optional.empty())) {
-            Page page = buildDeletePage(positions);
+            Page page = buildDeletePage(dataFilePath, positions);
             writer.write(page);
             writer.close();
             return new DuckLakeDeleteFileInfo(dataFileId, fileName, positions.size(), writer.getWrittenBytes(), 0);
         }
     }
 
-    private static Page buildDeletePage(List<Long> positions)
+    private static Page buildDeletePage(String dataFilePath, List<Long> positions)
     {
+        BlockBuilder fileNameBuilder = VARCHAR.createBlockBuilder(null, positions.size());
         BlockBuilder positionBuilder = BIGINT.createBlockBuilder(null, positions.size());
         for (Long position : positions) {
+            VARCHAR.writeSlice(fileNameBuilder, Slices.utf8Slice(dataFilePath));
             BIGINT.writeLong(positionBuilder, position);
         }
-        return new Page(positionBuilder.build());
+        return new Page(fileNameBuilder.build(), positionBuilder.build());
     }
 
     private String buildTableDirectoryPath()

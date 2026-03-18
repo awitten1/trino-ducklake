@@ -16,6 +16,7 @@ public class DuckLakeOutputTableHandle
     private final List<DuckLakeColumnHandle> columns;
     private final long tableId;
     private final long snapshotId;
+    private final String tableUuid;
     private final String dataPath;
     private final String schemaPath;
     private final String tablePath;
@@ -27,6 +28,7 @@ public class DuckLakeOutputTableHandle
             @JsonProperty("columns") List<DuckLakeColumnHandle> columns,
             @JsonProperty("tableId") long tableId,
             @JsonProperty("snapshotId") long snapshotId,
+            @JsonProperty("tableUuid") String tableUuid,
             @JsonProperty("dataPath") String dataPath,
             @JsonProperty("schemaPath") String schemaPath,
             @JsonProperty("tablePath") String tablePath)
@@ -36,6 +38,7 @@ public class DuckLakeOutputTableHandle
         this.columns = requireNonNull(columns, "columns is null");
         this.tableId = tableId;
         this.snapshotId = snapshotId;
+        this.tableUuid = requireNonNull(tableUuid, "tableUuid is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.schemaPath = schemaPath;
         this.tablePath = tablePath;
@@ -55,6 +58,9 @@ public class DuckLakeOutputTableHandle
 
     @JsonProperty
     public long getSnapshotId() { return snapshotId; }
+
+    @JsonProperty
+    public String getTableUuid() { return tableUuid; }
 
     @JsonProperty
     public String getDataPath() { return dataPath; }

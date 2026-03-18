@@ -320,28 +320,21 @@ public class DuckLakeMetadata
         if (duckLakeClient.getTableInfoWithSnapshot(tableName.getSchemaName(), tableName.getTableName()).isPresent()) {
             throw new TrinoException(ALREADY_EXISTS, "Table already exists: " + tableName);
         }
-        String dataPath = duckLakeClient.getDataPath();
-        String schemaPath = duckLakeClient.getSchemaPath(tableName.getSchemaName());
-        List<DuckLakeColumnHandle> temporaryColumns = new ArrayList<>();
-        List<ColumnMetadata> columns = tableMetadata.getColumns();
-        for (int i = 0; i < columns.size(); i++) {
-            ColumnMetadata column = columns.get(i);
-            temporaryColumns.add(new DuckLakeColumnHandle(
-                    column.getName(),
-                    column.getType(),
-                    i,
-                    i));
-        }
+        DuckLakeClient.PlannedCreateTable planned = duckLakeClient.planCreateTable(
+                tableName.getSchemaName(),
+                tableName.getTableName(),
+                tableMetadata.getColumns());
 
         return new DuckLakeOutputTableHandle(
                 tableName.getSchemaName(),
                 tableName.getTableName(),
-                temporaryColumns,
-                0,
+                planned.columns(),
+                planned.tableId(),
                 0, // snapshotId not needed for CTAS handle
-                dataPath,
-                schemaPath,
-                tableName.getTableName());
+                planned.tableUuid().toString(),
+                planned.dataPath(),
+                planned.schemaPath(),
+                planned.tablePath());
     }
 
     @Override
@@ -359,7 +352,14 @@ public class DuckLakeMetadata
                 handle.getColumns().stream()
                         .map(DuckLakeColumnHandle::getColumnMetadata)
                         .toList(),
-                files);
+                files,
+                new DuckLakeClient.PlannedCreateTable(
+                        handle.getTableId(),
+                        java.util.UUID.fromString(handle.getTableUuid()),
+                        handle.getDataPath(),
+                        handle.getSchemaPath(),
+                        handle.getTablePath(),
+                        handle.getColumns()));
         return Optional.empty();
     }
 

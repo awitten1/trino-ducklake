@@ -185,7 +185,7 @@ public class DuckLakePageSink
                 columnNames,
                 false,
                 false);
-        MessageType messageType = schemaConverter.getMessageType();
+        MessageType messageType = withDuckLakeFieldIds(schemaConverter.getMessageType());
         Map<List<String>, Type> primitiveTypes = schemaConverter.getPrimitiveTypes();
 
         ParquetWriterOptions writerOptions = ParquetWriterOptions.builder().build();
@@ -204,6 +204,15 @@ public class DuckLakePageSink
                 "trino-ducklake",
                 Optional.empty(),
                 Optional.empty());
+    }
+
+    private MessageType withDuckLakeFieldIds(MessageType messageType)
+    {
+        ImmutableList.Builder<org.apache.parquet.schema.Type> fields = ImmutableList.builder();
+        for (int i = 0; i < columns.size(); i++) {
+            fields.add(messageType.getType(i).withId(Math.toIntExact(columns.get(i).getColumnId())));
+        }
+        return new MessageType("duckdb_schema", fields.build());
     }
 
     private void ensureTableDirectoryExists(String tableDirectoryPath)

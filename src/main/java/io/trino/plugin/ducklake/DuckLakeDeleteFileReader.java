@@ -75,9 +75,10 @@ public class DuckLakeDeleteFileReader
             ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
             FileMetadata fileMetadata = parquetMetadata.getFileMetaData();
             MessageType fileSchema = fileMetadata.getSchema();
-            org.apache.parquet.schema.Type posType = getParquetTypeByName("pos", fileSchema);
+            String posColumnName = getExistingColumnName(fileSchema, "position", "pos");
+            org.apache.parquet.schema.Type posType = getParquetTypeByName(posColumnName, fileSchema);
             if (posType == null) {
-                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Delete file is missing expected pos column: " + deleteFilePath);
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Delete file is missing expected position column: " + deleteFilePath);
             }
 
             MessageType requestedSchema = new MessageType(fileSchema.getName(), posType);
@@ -96,12 +97,12 @@ public class DuckLakeDeleteFileReader
                     DOMAIN_COMPACTION_THRESHOLD,
                     parquetReaderOptions);
 
-            ColumnIO posColumnIo = lookupColumnByName(messageColumn, "pos");
+            ColumnIO posColumnIo = lookupColumnByName(messageColumn, posColumnName);
             Field posField = constructField(BIGINT, posColumnIo)
-                    .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported pos column in delete file: " + deleteFilePath));
+                    .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported position column in delete file: " + deleteFilePath));
             ParquetReader reader = new ParquetReader(
                     Optional.ofNullable(fileMetadata.getCreatedBy()),
-                    List.of(new Column("pos", posField)),
+                    List.of(new Column(posColumnName, posField)),
                     false,
                     rowGroups,
                     dataSource,
@@ -144,5 +145,15 @@ public class DuckLakeDeleteFileReader
             return Location.of(Path.of(path).toUri().toString());
         }
         return Location.of(path);
+    }
+
+    private static String getExistingColumnName(MessageType fileSchema, String... candidates)
+    {
+        for (String candidate : candidates) {
+            if (getParquetTypeByName(candidate, fileSchema) != null) {
+                return candidate;
+            }
+        }
+        return candidates[0];
     }
 }
