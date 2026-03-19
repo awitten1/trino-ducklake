@@ -10,14 +10,8 @@ if [ ! -f "${CATALOG_FILE}" ]; then
     FS_MODE="${FS_MODE:-local}"
 
     if [ -z "${METADATA_CONNECTION_STRING:-}" ]; then
-        case "$FS_MODE" in
-            s3|gcs)
-                METADATA_CONNECTION_STRING="jdbc:postgresql://postgres:5432/ducklake_meta?user=postgres&password=testpass"
-                ;;
-            local|*)
-                METADATA_CONNECTION_STRING="jdbc:sqlite:/data/metadata.sqlite"
-                ;;
-        esac
+        echo "ERROR: METADATA_CONNECTION_STRING is required (e.g. jdbc:sqlite:/data/metadata.sqlite or jdbc:postgresql://host:5432/db?user=...)" >&2
+        exit 1
     fi
 
     case "$FS_MODE" in
@@ -30,10 +24,10 @@ s3.region=${S3_REGION:-us-east-1}
 EOF
 
             if [ -n "${S3_ENDPOINT:-}" ]; then
-                cat >> "${CATALOG_FILE}" <<EOF
-s3.endpoint=${S3_ENDPOINT}
-s3.path-style-access=true
-EOF
+                echo "s3.endpoint=${S3_ENDPOINT}" >> "${CATALOG_FILE}"
+            fi
+            if [ "${S3_PATH_STYLE_ACCESS:-false}" = "true" ]; then
+                echo "s3.path-style-access=true" >> "${CATALOG_FILE}"
             fi
             ;;
         gcs)
@@ -43,13 +37,24 @@ ducklake.metadata-connection-string=${METADATA_CONNECTION_STRING}
 fs.native-gcs.enabled=true
 EOF
             ;;
-        local|*)
+        azure)
+            cat > "${CATALOG_FILE}" <<EOF
+connector.name=ducklake
+ducklake.metadata-connection-string=${METADATA_CONNECTION_STRING}
+fs.native-azure.enabled=true
+EOF
+            ;;
+        local)
             cat > "${CATALOG_FILE}" <<EOF
 connector.name=ducklake
 ducklake.metadata-connection-string=${METADATA_CONNECTION_STRING}
 fs.native-local.enabled=true
-local.location=/
+local.location=/data
 EOF
+            ;;
+        *)
+            echo "ERROR: Unknown FS_MODE '$FS_MODE'. Supported: local, s3, gcs, azure" >&2
+            exit 1
             ;;
     esac
 fi

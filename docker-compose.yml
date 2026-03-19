@@ -176,6 +176,7 @@ services:
       METADATA_CONNECTION_STRING: "jdbc:postgresql://postgres:5432/ducklake_meta_s3?user=postgres&password=testpass"
       S3_REGION: "us-east-1"
       S3_ENDPOINT: "http://minio:9000"
+      S3_PATH_STYLE_ACCESS: "true"
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
     depends_on:
