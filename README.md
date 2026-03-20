@@ -61,6 +61,34 @@ Start Trino:
 trino-server-479/bin/launcher run
 ```
 
+## Tests
+
+```bash
+./mvnw test
+```
+
+The test suite has three layers:
+
+**Unit tests** — pure logic, no external dependencies, run in milliseconds:
+
+- `TestDuckLakeTypeMapping` — bidirectional type mapping (Trino ↔ DuckLake) and round-trip correctness
+- `TestDuckLakeConnectionManager` — JDBC driver selection, metadata base directory extraction, connection opening
+- `TestDuckLakeHandleSerialization` — JSON round-trip for handle classes (`DuckLakeSplit`, `DuckLakeColumnHandle`, `DuckLakeInsertTableHandle`, `DuckLakeOutputTableHandle`)
+
+**Integration tests** — direct `DuckLakeClient` calls against a temporary SQLite metadata DB:
+
+- `TestDuckLakeClient` — schema/table CRUD, column retrieval, file registration via `finishInsert`, snapshot isolation
+
+**End-to-end tests** — boots an embedded Trino via `DistributedQueryRunner` and runs SQL:
+
+- `TestDuckLakeQueries` — DDL (CREATE/DROP SCHEMA/TABLE, CTAS, DESCRIBE), read path (SELECT with predicates, aggregates, empty tables), write path (INSERT VALUES/SELECT, multiple batches), type coverage (integer, float, boolean, varchar, date), and update/delete via the merge path
+
+To run a specific test class:
+
+```bash
+./mvnw test -Dtest="TestDuckLakeTypeMapping"
+```
+
 ## Docker Compose
 
 The included `docker-compose.yml` provides ready-to-use profiles for different storage backends.
